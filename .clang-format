@@ -1,0 +1,9 @@
+Language: Cpp
+BasedOnStyle: LLVM
+IndentWidth: 2
+SortIncludes: Never
+IncludeBlocks: Preserve
+PointerAlignment: Left
+DerivePointerAlignment: false
+ColumnLimit: 70
+ReflowComments: true

@@ -1,0 +1,23 @@
+# Line endings: LF in the repository, native in the working tree.
+# Everything here is already LF; this keeps it that way if the repo is
+# ever cloned on Windows.
+* text=auto
+
+# Hunk headers that name the enclosing function. This earns its place
+# here more than in most repositories: gmp-ecpp.cpp is a single 2800-line
+# translation unit that transcribes Cohen's algorithms literally, goto
+# labels and all. Git's default heuristic takes the nearest line starting
+# at column 0, which at the six labels in this file yields "L2:", "end:"
+# or "clear_variables:" -- true, and useless. The cpp driver names the
+# function instead.
+*.cpp diff=cpp
+
+# Likewise for the long-form docs: the enclosing section heading rather
+# than whichever line of prose happened to sit above the change.
+*.md diff=markdown
+
+# Meaningless outside a git checkout, so keep them out of `git archive`
+# tarballs. Note LICENSE is deliberately NOT listed: the GPL requires it
+# travel with the work.
+.gitattributes export-ignore
+.gitignore export-ignore

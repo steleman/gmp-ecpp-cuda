@@ -1,0 +1,15 @@
+# Build output
+build/
+gmp-ecpp
+gmpecpp-bench
+gmpecpp-verify
+libgmpecpp.so
+libgmpecpp.so.*
+*.o
+# The article PDF is tracked deliberately; its intermediates are not.
+doc/*.aux
+doc/*.log
+doc/*.out
+doc/*.toc
+ecm-reach
+kernel-latency

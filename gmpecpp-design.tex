@@ -1,0 +1,604 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{url}
+\usepackage[margin=1in]{geometry}
+\usepackage[hidelinks]{hyperref}
+
+\lstset{basicstyle=\ttfamily\small,columns=fullflexible,breaklines=true}
+
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{\textbf{libgmpecpp}: An Elliptic Curve Primality Prover as a
+  Reusable Library, with a CGBN/CUDA Backend for the Factoring Stage}
+
+\author{Stefan Teleman \code{<stefan.teleman@gmail.com>}}
+
+\date{September 3, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We describe the design, implementation and empirical evaluation of
+\emph{libgmpecpp}, a shared library providing elliptic curve primality
+proving (ECPP) in the Atkin--Morain formulation, together with a GPU
+backend for its factoring stage built on NVIDIA's CGBN fixed-width
+multiple-precision library.
+
+The starting point is a single C++ translation unit descended from
+Pate Williams' 1997 implementation of Cohen's Algorithm 9.2.4, with
+later contributions by James Wanless, Chris Studholme, Elisavet
+Konstantinou, Yiannis Stamatiu, Christos Zaroliagis, Scott Contini, Paul
+Zimmermann and Timo Poikola. Converting that program into a library
+required three changes that are individually small but jointly
+structural: the removal of all direct console output in favour of a
+line-buffered logging callback; the elimination of a process-terminating
+\code{exit(2)} deep inside the polynomial arithmetic, which we replace by
+an exception carrying the nontrivial divisor that a failed modular
+inversion exhibits; and the return of the primality certificate as
+structured data rather than as printed text, which additionally permits
+the library to distinguish outcomes that the historical command line
+interface conflates under a single exit status. We present a C API,
+stable across C and C++, exporting thirty-two symbols. The original
+command line tool is reimplemented as a client of this API and is shown
+to be byte-identical to the historical program across 156 runs spanning
+thirteen flag combinations, four inputs and three seeds, comparing
+standard output, standard error and exit status.
+
+We then profile the prover by phase and report a result that governs the
+remainder of the work: the distribution of runtime between the
+class-polynomial layer and the factoring layer is not fixed, but is
+controlled almost entirely by the floating-point working precision. At
+the historical default of $10^4$ bits, construction of Hilbert class
+polynomials accounts for $66$--$89\%$ of runtime on inputs of $30$ to
+$60$ decimal digits and elliptic curve factorisation for $1$--$7\%$; at
+$10^3$ bits the same measurements invert, with factorisation accounting
+for $58$--$99.5\%$. The absolute cost of factorisation is unchanged
+between the two settings, since it is integer work; what changes is the
+cost of everything surrounding it. We reduce the default precision to
+$10^3$ bits after verifying across the thirty-three primes of the committed
+benchmark set, spanning $20$ to $180$ decimal digits, that every input still proves, that no
+loss-of-precision event is triggered, and that no proof becomes slower.
+This alone yields speedups of up to $46.6\times$ on small inputs.
+
+Because CGBN provides fixed-width \emph{integer} arithmetic while the
+class-polynomial layer is arbitrary-precision \emph{floating point}
+implemented as hand-rolled Taylor series, only the factoring stage admits
+a CGBN formulation. Under the revised precision default this is
+fortunate rather than limiting, since factorisation is now the dominant
+cost. We implement stage-one ECM on Montgomery curves under Suyama's
+parametrisation, in $XZ$ coordinates so that the inner loop requires no
+modular inversion, with one CGBN instance per curve and Montgomery
+representation throughout. We show the resulting kernel to be latency
+bound rather than throughput bound: sixteen-fold increases in
+concurrent curve count cost only $1.4\times$ in wall time, since the
+binding constraint is the serial chain of prime powers each curve must
+traverse. Consequently curves are nearly free, which is precisely the
+shape that ECM rewards.
+
+Measured on an RTX 4080 Laptop, whole-proof speedups are $1.00$--$1.02\times$
+below sixty decimal digits, where the host already splits cofactors in
+milliseconds, rising to $2.45\times$ at ninety digits, $3.22\times$ at
+one hundred and ten, and $28.4\times$ at one hundred and forty. Across a
+thirty-six-proof sweep from ninety to one hundred and eighty digits the
+GPU backend is faster in twenty-five runs, with median speedup
+$2.37\times$ and aggregate $2.66\times$. We argue that the aggregate
+figure understates the effect, which is better characterised as variance
+reduction: host runtimes span $0.65$ to $51.5$ seconds while
+GPU-assisted runtimes span $0.66$ to $16.4$ seconds. The mechanism is that a discriminant the host
+abandons for want of a factorisation is one the GPU can use, so
+GPU-assisted proofs are frequently \emph{shorter} as well as faster.
+
+We report two negative results that shaped the design. First, dispatching
+to the GPU before the host has attempted a cofactor makes proofs
+approximately twice as slow, because the majority of factoring calls in
+an ECPP downrun exist in order to reject candidate curve orders quickly
+and are expected to fail; the backend therefore attempts the host path
+first and escalates only above a configurable cofactor width. Second,
+byte-comparison against the historical program is an inappropriate
+correctness criterion once the GPU is engaged, since it discovers
+different factorisations and hence produces different, equally valid
+certificates. We therefore supply an independent certificate verifier
+sharing no code with the prover, which re-derives chain linkage, the
+divisibility $q \mid m$, the Goldwasser--Kilian bound $q > (\sqrt[4]{n}+1)^2$,
+Hasse's bound on the curve order, curve membership of the base point, and
+the two scalar multiplication conditions, and which is itself subjected
+to a negative control. Twenty certificates produced by both backends
+across ten large primes verify successfully.
+
+The complete system is licensed GPL-3.0-or-later, comprises a shared
+library, a compatible command line tool, a benchmark harness and a
+verifier, and builds with or without CUDA present.
+\end{abstract}
+
+\tableofcontents
+
+\section{Introduction}
+
+A probabilistic primality test such as Miller--Rabin \cite{miller1976,
+rabin1980} establishes compositeness conclusively but primality only with
+high probability. Elliptic curve primality proving, introduced by
+Goldwasser and Kilian \cite{goldwasser1986} and made practical by Atkin
+and Morain \cite{atkin1993}, instead produces a \emph{certificate}: a
+chain of elliptic curves whose validity can be checked independently of
+the program that produced it, and in substantially less time than it took
+to construct.
+
+This paper documents the conversion of an existing ECPP implementation
+into a reusable library, the addition of a GPU backend for its factoring
+stage, and the empirical characterisation of both. We emphasise the
+measurements throughout, because two of the design decisions that matter
+most were forced by data that contradicted our initial expectations.
+
+\section{Provenance and attribution}
+
+The prover descends from a program written by Pate Williams in 1997,
+implementing Algorithm 9.2.4 of Cohen \cite{cohen1993}, with subsequent
+contributions from James Wanless (2008--2019), Chris Studholme (2004),
+Elisavet Konstantinou, Yiannis Stamatiu and Christos Zaroliagis (2003),
+Scott Contini (1996), Paul Zimmermann (2005) and Timo Poikola (2010). It
+is distributed under the GNU General Public License, version 3 or later,
+and the present work preserves that licensing.
+
+The mathematical content is almost entirely classical or due to the
+authors cited in Section~\ref{sec:algorithms}. Our contribution is
+confined to software architecture, the GPU formulation of the factoring
+stage, the verification methodology, and the measurements.
+
+\section{Algorithms and their attribution}
+\label{sec:algorithms}
+
+We enumerate every algorithm the implementation relies upon, with its
+source. Citations are attached in the code at the point of use, and we
+preserve them when code is moved.
+
+\subsection{Primality proving}
+
+\begin{itemize}
+  \item \textbf{The ECPP criterion.} Goldwasser and Kilian
+    \cite{goldwasser1986}. If $E$ is an elliptic curve over
+    $\mathbb{Z}/n\mathbb{Z}$ of order $m$, $q \mid m$ is prime with
+    $q > (\sqrt[4]{n}+1)^2$, and $P \in E$ satisfies $[m/q]P \neq
+    \mathcal{O}$ while $[q]([m/q]P) = \mathcal{O}$, then $n$ is prime.
+  \item \textbf{The Atkin--Morain downrun.} Atkin and Morain
+    \cite{atkin1993}; Cohen \cite[Algorithm 9.2.4, p.~474]{cohen1993}.
+    Complex multiplication supplies curves of known order, and the
+    criterion above reduces primality of $n$ to primality of the smaller
+    $q$, recursively.
+  \item \textbf{Miller--Rabin.} Miller \cite{miller1976} and Rabin
+    \cite{rabin1980}, via GMP's \code{mpz\_probab\_prime\_p} with ten
+    repetitions, used to reject composites before ECPP is attempted.
+\end{itemize}
+
+\subsection{Number-theoretic subroutines}
+
+\begin{itemize}
+  \item \textbf{Square roots modulo $p$.} Cohen
+    \cite[Algorithm 1.5.1, p.~33]{cohen1993}, this being the
+    Tonelli--Shanks method. Closed forms are used first for
+    $p \equiv 3 \pmod 4$ and $p \equiv 5 \pmod 8$.
+  \item \textbf{RESSOL.} Shanks' algorithm as described by Niven,
+    Zuckerman and Montgomery \cite[pp.~110--114]{niven1991}; the
+    implementation in this codebase is due to Scott Contini and serves as
+    a final fallback.
+  \item \textbf{Modified Cornacchia.} Cohen
+    \cite[Algorithm 1.5.3, p.~36]{cohen1993}, after Cornacchia
+    \cite{cornacchia1908}, solving $x^2 + |D|y^2 = 4p$.
+  \item \textbf{Roots of a polynomial modulo $p$.} Cohen
+    \cite[Algorithm 1.6.1, p.~37]{cohen1993}, an equal-degree splitting
+    procedure in the manner of Cantor and Zassenhaus
+    \cite{cantor1981}.
+  \item \textbf{Lenstra's elliptic curve method.} Lenstra
+    \cite{lenstra1987}; Cohen \cite[Algorithm 10.3.3, p.~488]{cohen1993}.
+\end{itemize}
+
+\subsection{Class polynomial construction}
+
+\begin{itemize}
+  \item \textbf{Hilbert class polynomials.} Cohen
+    \cite[Algorithm 7.6.1, p.~415]{cohen1993}. Reduced forms $(a,b,c)$ of
+    discriminant $D$ are enumerated, the $j$-invariant evaluated at each,
+    and the linear and quadratic factors multiplied together. The
+    $j$-invariant is built from the modular discriminant $\Delta$, itself
+    obtained from a Dedekind eta partial sum.
+  \item \textbf{Weber class polynomials.} Weber
+    \cite[\S127]{weber1908}; Kaltofen and Yui \cite{kaltofen1991};
+    Atkin and Morain \cite{atkin1993}. Weber polynomials have
+    substantially smaller coefficients than their Hilbert counterparts
+    and are correspondingly cheaper to construct.
+  \item \textbf{Weber-to-$j$ conversion.} Kaltofen and Valente
+    \cite{kaltofen1989}, whose Las Vegas primality test supplies the map
+    from a Watson root to a Hilbert root, switching on $D \bmod 8$ and
+    passing through unchanged when $D \equiv 0 \pmod{32}$.
+  \item \textbf{Auxiliary predicates.} The functions denoted $G$, $I$,
+    $J_1$, $K$, $L$, $M$ and $N$ implement helper predicates from the
+    IEEE P1363 standard \cite{ieee1363}, following the presentations of
+    Kaltofen--Yui and Atkin--Morain. Work on efficient curve generation
+    over prime fields by Konstantinou, Stamatiou and Zaroliagis
+    \cite{konstantinou2002} informs this portion of the implementation.
+  \item \textbf{Transcendental constants.} $\pi$ is obtained at working
+    precision by Hutton's Machin-like formula
+    $\pi = 4(\arctan\frac{1}{2} + \arctan\frac{1}{3})$, evaluated with the
+    library's own arctangent.
+\end{itemize}
+
+\subsection{GPU factoring}
+
+\begin{itemize}
+  \item \textbf{Montgomery curves and $XZ$ arithmetic.} Montgomery
+    \cite{montgomery1987}, supplying the curve form
+    $By^2 = x^3 + Ax^2 + x$, differential addition, and the ladder that
+    together permit stage-one ECM without modular inversion in the inner
+    loop.
+  \item \textbf{Suyama's parametrisation.} Suyama, as reported by
+    Montgomery \cite{montgomery1987} and Zimmermann and Dodson
+    \cite{zimmermann2006}, generating curves with favourable torsion from
+    a single parameter $\sigma$.
+  \item \textbf{Montgomery modular multiplication.} Montgomery
+    \cite{montgomery1985}, used throughout the kernel via CGBN's
+    Montgomery primitives.
+  \item \textbf{CGBN.} The Cooperative Groups Big Numbers library of
+    NVIDIA Labs \cite{cgbn}, which supplies fixed-width multiple-precision
+    integer arithmetic distributed across cooperating threads.
+  \item \textbf{GMP.} Granlund and collaborators \cite{gmp}, underlying
+    all host arithmetic.
+\end{itemize}
+
+\section{From program to library}
+
+\subsection{Three structural obstacles}
+
+A program may print, may terminate, and may report its findings as text.
+A library may do none of these. Each prohibition forced a specific change.
+
+\paragraph{Output.} All fifty-one direct console writes were redirected
+to a sink that accumulates output and delivers it to an optional callback
+one complete line at a time. Line buffering is not incidental: the
+original streams fragments of a single line across several functions, so
+per-statement delivery would fragment the commentary. With no callback
+installed the library is silent.
+
+\paragraph{Termination.} The original called \code{exit(2)} from within
+its modular polynomial arithmetic upon encountering a non-invertible
+element. This is a proof of compositeness rather than an error, and it is
+unacceptable for a library to terminate its host process on discovering
+one. We compute $\gcd(y, m)$, which is precisely the nontrivial divisor
+that the failed inversion exhibits, and throw an exception carrying it,
+caught at the API boundary and reported as a composite result with the
+factor attached.
+
+\paragraph{Results as data.} The certificate is returned as an array of
+structured steps. This additionally repairs an ambiguity in the original:
+the command line tool returns exit status $2$ for a proved composite, for
+exhaustion of discriminants, and for exceeding factoring bounds alike.
+The library reports these separately while the tool retains its
+historical behaviour.
+
+\subsection{Configuration and concurrency}
+
+The prover retains its configuration in file-scope globals. Rather than
+thread a context through some 2\,600 lines of transcribed algorithms, we
+serialise entry points with a mutex: concurrent calls are safe but not
+parallel, and callers requiring throughput should use separate processes.
+This is documented rather than concealed.
+
+The transcendental constants $\pi$, $e$ and $\ln 1.9$ are computed at
+working precision, which at $10^4$ bits costs approximately $0.4$
+seconds. We cache them by precision, so that a caller proving many
+numbers pays this cost once. A separate entry point emits the banner and
+computes these constants, allowing an interactive client to prompt for
+input after the banner has appeared, as the original did.
+
+\subsection{Interface}
+
+The public interface comprises thirty-two exported symbols, all others
+being hidden. The header compiles as both C and C++, and a variant
+accepting a GMP integer directly is declared when \code{<gmp.h>} precedes
+it.
+
+\section{The CGBN backend}
+
+\subsection{Why only the factoring stage}
+
+CGBN provides fixed-width integer arithmetic. Of the prover's four
+layers, the class-polynomial layer is arbitrary-precision \emph{floating
+point}, implemented as hand-rolled Taylor series with argument reduction;
+the root-finding layer is sequential; and the downrun is inherently
+serial, each step depending on its predecessor. Only elliptic curve
+factorisation, in which every curve is an independent trial and a single
+success suffices, admits a CGBN formulation.
+
+\subsection{Kernel design}
+
+Each CGBN instance carries one curve. Given $\sigma$, Suyama's
+parametrisation gives $u = \sigma^2 - 5$, $v = 4\sigma$, initial point
+$(u^3 : v^3)$, and
+\[
+  a_{24} = \frac{A+2}{4} = \frac{(v-u)^3(3u+v)}{16u^3v},
+\]
+requiring one modular inversion per curve. A failed inversion again
+exhibits a factor, and is reported as such. Stage one then multiplies the
+point by every prime power below the bound, using Montgomery's
+differential addition and doubling in $XZ$ coordinates, so that no
+inversion occurs in the inner loop. A nontrivial $\gcd$ of the final $Z$
+coordinate with $n$ is a factor.
+
+Instance width is fixed at compile time; the backend selects the
+narrowest of $512$, $1024$ and $2048$ bits that accommodates the input.
+
+\subsection{The kernel is latency bound}
+
+Table~\ref{tab:kernel} reports kernel cost as a function of the
+stage-one bound $B_1$ and the number of concurrent curves.
+
+\begin{table}[t]
+\centering
+\begin{tabular}{rrrr}
+\toprule
+$B_1$ & 256 curves & 1024 curves & 4096 curves \\
+\midrule
+$10^2$ & 0.022\,s & 0.026\,s & 0.033\,s \\
+$10^3$ & 0.023\,s & 0.024\,s & 0.034\,s \\
+$10^4$ & 0.242\,s & 0.242\,s & 0.346\,s \\
+$5\times10^4$ & 1.119\,s & 1.186\,s & 1.742\,s \\
+\bottomrule
+\end{tabular}
+\caption{GPU kernel cost. Sixteen-fold increases in curve count cost
+  $1.4\times$ in wall time; cost tracks $B_1$ instead.}
+\label{tab:kernel}
+\end{table}
+
+Cost tracks $B_1$, which determines the length of the serial chain each
+curve must traverse, and is nearly independent of curve count until the
+device saturates. Curves are therefore almost free. This is the shape ECM
+rewards, and it is the reason the backend defaults to thousands of
+concurrent curves against the host implementation's twenty per bound.
+
+\subsection{Dispatch policy: a negative result}
+
+Our initial implementation dispatched to the GPU whenever the CUDA
+backend was selected. This made whole proofs approximately twice as slow.
+The cause is that most factoring calls in an ECPP downrun exist to reject
+candidate curve orders, and are \emph{expected} to fail; a fixed
+per-launch cost paid on every such rejection is pure loss. The backend
+consequently attempts the host implementation first and escalates to the
+GPU only when the host has failed \emph{and} the cofactor exceeds a
+configurable width, $192$ bits by default. Under this policy enabling the
+backend is neutral where it cannot help and substantially profitable
+where it can.
+
+\section{Precision as the dominant parameter}
+
+Table~\ref{tab:phases} reports per-phase exclusive time at two working
+precisions.
+
+\begin{table}[t]
+\centering
+\begin{tabular}{lrrr}
+\toprule
+Phase & 30 digits & 60 digits & 100 digits \\
+\midrule
+\multicolumn{4}{l}{\emph{At $10^3$ bits}} \\
+Elliptic curve factorisation & 52.2\% & 98.3\% & 99.5\% \\
+Hilbert class polynomials    & 37.1\% & 1.4\%  & 0.1\% \\
+Total                        & 0.056\,s & 3.598\,s & 18.75\,s \\
+\midrule
+\multicolumn{4}{l}{\emph{At $10^4$ bits}} \\
+Elliptic curve factorisation & 1.0\%  & 28.8\% & 89.9\% \\
+Hilbert class polynomials    & 84.6\% & 67.7\% & 7.7\% \\
+Total                        & 2.923\,s & 12.239\,s & 20.68\,s \\
+\bottomrule
+\end{tabular}
+\caption{Phase distribution against working precision.}
+\label{tab:phases}
+\end{table}
+
+The factoring rows read across as $0.029$, $3.536$, $18.644$ seconds at
+$10^3$ bits against $0.029$, $3.527$, $18.590$ seconds at $10^4$: the
+absolute cost of factorisation is unchanged, since precision does not
+enter integer arithmetic. What changes is the cost of everything around
+it.
+
+We therefore reduced the default precision to $10^3$ bits, after
+verifying across the thirty-three primes of the committed benchmark
+set, from $20$ to $180$ decimal digits, that
+every input still proves, that no loss-of-precision event occurs, and
+that no proof becomes slower. Observed speedups range from $46.6\times$ at
+thirty digits to $1.1\times$ beyond one hundred, with median
+$1.60\times$. The failure mode this
+trades against is bounded: insufficient precision causes a
+consistency check on the constant coefficient to fail, whereupon the
+discriminant is abandoned and the sweep continues. It costs time, not
+correctness.
+
+\section{Verification}
+
+Byte-comparison against the historical program is a sound correctness
+criterion only while the GPU is not engaged. Above the escalation
+threshold the GPU discovers different factorisations and therefore
+produces different, equally valid certificates. Two tests are accordingly
+required.
+
+Below the threshold we require byte-identity, and obtain it: 156 runs
+across thirteen flag combinations, four inputs and three seeds agree on
+standard output, standard error and exit status, with the backend both
+enabled and disabled.
+
+Above it we require validity, and check it with a verifier that shares no
+code with the prover, its elliptic curve arithmetic written directly
+against GMP. For each step it re-derives chain linkage, $q \mid m$, the
+Goldwasser--Kilian bound, Hasse's bound on $m$, membership of $P$ on the
+curve, equality of $[m/q]P$ with the recorded point and its distinctness
+from $\mathcal{O}$, and that $[q]$ of that point is $\mathcal{O}$;
+finally it requires the chain to terminate at a $q$ small enough to
+settle by trial division. A self-test presents the verifier with a
+certificate checked against the wrong starting value and requires
+rejection, on the principle that a verifier never observed to reject
+anything is not evidence.
+
+Twenty certificates, from ten primes of ninety to one hundred and forty
+digits under both backends, verify successfully.
+
+\section{Results}
+
+Measurements were taken on an NVIDIA GeForce RTX 4080 Laptop (sm\_89),
+CUDA 12.9, GCC 14.3.1 at \code{-O2}, with the seed pinned.
+
+\begin{table}[t]
+\centering
+\begin{tabular}{rrrrrr}
+\toprule
+Digits & Host & GPU & Speedup & Host ECM & GPU ECM \\
+\midrule
+20  & 0.006\,s  & 0.006\,s & 1.02$\times$ & 0.003\,s & 0.003\,s \\
+30  & 0.089\,s  & 0.084\,s & 1.06$\times$ & 0.052\,s & 0.050\,s \\
+40  & 0.133\,s  & 0.133\,s & 1.00$\times$ & 0.120\,s & 0.120\,s \\
+60  & 0.161\,s  & 0.161\,s & 1.00$\times$ & 0.122\,s & 0.122\,s \\
+90  & 2.090\,s  & 0.853\,s & 2.45$\times$ & 1.999\,s & 0.780\,s \\
+110 & 5.064\,s  & 1.566\,s & 3.23$\times$ & 4.909\,s & 1.450\,s \\
+140 & 52.292\,s & 1.840\,s & 28.42$\times$ & 52.132\,s & 1.674\,s \\
+\bottomrule
+\end{tabular}
+\caption{Whole-proof timings. The final two columns confirm that the
+  entire difference is attributable to the factoring stage.}
+\label{tab:proofs}
+\end{table}
+
+Over a thirty-six-proof sweep covering every prime of ninety digits or
+more in the committed benchmark data, at two seeds each, the GPU backend
+is faster in twenty-five runs, with median speedup $2.37\times$, range
+$0.47\times$ to $26.3\times$, and aggregate $322.1 \to 121.1$ seconds,
+or $2.66\times$.
+
+The aggregate understates the phenomenon. Host runtimes across that sweep
+span $0.65$ to $51.5$ seconds; GPU-assisted runtimes span $0.66$ to
+$16.4$ seconds. The effect is best described as variance reduction: the backend
+does not uniformly accelerate proofs so much as eliminate pathological
+ones, in which the host's twenty curves per bound labour against a
+cofactor that thousands of curves split at once. Every run in which the
+backend loses is one in which the host was already fast, and it loses by
+a fraction of a second.
+
+A corollary appears in the certificate lengths. At one hundred and forty
+digits the host required fifteen steps and $51.9$ seconds where the GPU
+found a superior factorisation in eight steps and $1.9$ seconds: a
+discriminant abandoned by the host for want of a factorisation is one the
+GPU can use, so its proofs are frequently shorter as well as faster.
+
+\section{Limitations}
+
+Class polynomial degree, that is the class number $h(D)$, must remain
+below $8192$; no bounds check exists. Polynomial buffers are fixed-size
+stack arrays and the root-finding routine is recursive, at approximately
+$512$\,KB per frame. The GPU backend implements stage one of ECM only;
+stage two would extend its reach further. The exception introduced in
+place of \code{exit(2)} unwinds frames holding raw GMP temporaries, which
+leak on that path; the path is reached only for composite inputs, but the
+defect should be addressed before the library is applied to many
+composites in one process. Finally, the serialisation of API entry points
+precludes intra-process parallelism.
+
+\section*{Acknowledgements}
+
+The prover is the work of Pate Williams, James Wanless, Chris Studholme,
+Elisavet Konstantinou, Yiannis Stamatiu, Christos Zaroliagis, Scott
+Contini, Paul Zimmermann and Timo Poikola, to whom the substance of this
+software is owed. We thank the authors of GMP and of CGBN.
+
+\begin{thebibliography}{99}
+
+\bibitem{atkin1993} A. O. L. Atkin and F. Morain.
+  \emph{Elliptic curves and primality proving}.
+  Mathematics of Computation, 61(203):29--68, 1993.
+
+\bibitem{cantor1981} D. G. Cantor and H. Zassenhaus.
+  \emph{A new algorithm for factoring polynomials over finite fields}.
+  Mathematics of Computation, 36(154):587--592, 1981.
+
+\bibitem{cgbn} NVIDIA Labs.
+  \emph{CGBN: CUDA Accelerated Multiple Precision Arithmetic (Big Num)
+  using Cooperative Groups}.
+  \url{https://github.com/NVlabs/CGBN}.
+
+\bibitem{cohen1993} H. Cohen.
+  \emph{A Course in Computational Algebraic Number Theory}.
+  Graduate Texts in Mathematics 138. Springer-Verlag, 1993.
+
+\bibitem{cornacchia1908} G. Cornacchia.
+  \emph{Su di un metodo per la risoluzione in numeri interi
+  dell'equazione $\sum_{h=0}^{n} C_h x^{n-h} y^h = P$}.
+  Giornale di Matematiche di Battaglini, 46:33--90, 1908.
+
+\bibitem{gmp} T. Granlund and the GMP development team.
+  \emph{GNU MP: The GNU Multiple Precision Arithmetic Library}.
+  \url{https://gmplib.org/}.
+
+\bibitem{goldwasser1986} S. Goldwasser and J. Kilian.
+  \emph{Almost all primes can be quickly certified}.
+  In Proceedings of the 18th Annual ACM Symposium on Theory of
+  Computing, pages 316--329, 1986.
+
+\bibitem{ieee1363} IEEE.
+  \emph{IEEE Standard Specifications for Public-Key Cryptography}.
+  IEEE Std 1363-2000, 2000.
+
+\bibitem{kaltofen1989} E. Kaltofen and T. Valente.
+  \emph{An improved Las Vegas primality test}.
+  In Proceedings of the ACM-SIGSAM International Symposium on Symbolic
+  and Algebraic Computation, pages 26--33, 1989.
+
+\bibitem{kaltofen1991} E. Kaltofen and N. Yui.
+  \emph{Explicit construction of the Hilbert class fields of imaginary
+  quadratic fields by integer lattice reduction}.
+  In Number Theory (New York Seminar 1989--1990), pages 149--202.
+  Springer-Verlag, 1991.
+
+\bibitem{konstantinou2002} E. Konstantinou, Y. C. Stamatiou and
+  C. Zaroliagis.
+  \emph{On the efficient generation of elliptic curves over prime
+  fields}.
+  In Cryptographic Hardware and Embedded Systems (CHES 2002),
+  Lecture Notes in Computer Science 2523, pages 333--348, 2003.
+
+\bibitem{lenstra1987} H. W. Lenstra, Jr.
+  \emph{Factoring integers with elliptic curves}.
+  Annals of Mathematics, 126(3):649--673, 1987.
+
+\bibitem{miller1976} G. L. Miller.
+  \emph{Riemann's hypothesis and tests for primality}.
+  Journal of Computer and System Sciences, 13(3):300--317, 1976.
+
+\bibitem{montgomery1985} P. L. Montgomery.
+  \emph{Modular multiplication without trial division}.
+  Mathematics of Computation, 44(170):519--521, 1985.
+
+\bibitem{montgomery1987} P. L. Montgomery.
+  \emph{Speeding the Pollard and elliptic curve methods of
+  factorization}.
+  Mathematics of Computation, 48(177):243--264, 1987.
+
+\bibitem{niven1991} I. Niven, H. S. Zuckerman and H. L. Montgomery.
+  \emph{An Introduction to the Theory of Numbers}, 5th edition.
+  John Wiley and Sons, 1991.
+
+\bibitem{rabin1980} M. O. Rabin.
+  \emph{Probabilistic algorithm for testing primality}.
+  Journal of Number Theory, 12(1):128--138, 1980.
+
+\bibitem{weber1908} H. Weber.
+  \emph{Lehrbuch der Algebra}, Band III, 2nd edition.
+  Friedrich Vieweg und Sohn, 1908.
+
+\bibitem{zimmermann2006} P. Zimmermann and B. Dodson.
+  \emph{20 years of ECM}.
+  In Algorithmic Number Theory (ANTS-VII), Lecture Notes in Computer
+  Science 4076, pages 525--542, 2006.
+
+\end{thebibliography}
+
+\end{document}
