@@ -4,21 +4,23 @@
  * This is the original program's main(), reimplemented against the
  * library's public API.  It exists both as the shipped tool and as
  * evidence that the API is sufficient to reproduce the original
- * behavior, output and exit codes exactly.
+ * behaviour, output and exit codes exactly.
  */
 
-#include "gmpecpp.h"
 #include <getopt.h>
-#include <gmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include <gmp.h>
+
+#include "gmpecpp.h"
+
 static const char *program_name;
 
 static void print_usage(FILE *stream, int exit_code) {
-  (void) fprintf(stream, "Usage: %s options [ < inputfile ]\n", program_name);
-  (void) fprintf(
+  fprintf(stream, "Usage: %s options [ < inputfile ]\n", program_name);
+  fprintf(
       stream,
       "	-h	--help			Display this usage information.\n"
       "	-Q	--Quiet			Print very reduced messages.\n"
@@ -39,6 +41,9 @@ static void print_usage(FILE *stream, int exit_code) {
       "autoincrement).\n"
       "	-C	--cuda			Use the CUDA/CGBN backend for ECM "
       "factoring.\n"
+      "	-T	--threads		ECM worker threads (0 = one per CPU).\n"
+      "	-S	--sweep			Discriminant sweep threads (0 = one "
+      "per CPU).\n"
       "	-c	--curves		Concurrent ECM curves for the CUDA "
       "backend.\n");
   exit(exit_code);
@@ -46,18 +51,19 @@ static void print_usage(FILE *stream, int exit_code) {
 
 /* The library hands back whole lines; the original wrote them to stdout. */
 static void emit(const char *line, void *) {
-  (void) fputs(line, stdout);
-  (void) fputc('\n', stdout);
-  (void) fflush(stdout);
+  fputs(line, stdout);
+  fputc('\n', stdout);
+  fflush(stdout);
 }
 
 int main(int argc, char *argv[]) {
   int next_option;
   int Quiet = 0, quiet = 0, verbose = 0;
   int use_cuda = 0;
-  unsigned int curves = 0;
+  unsigned int curves = 0, threads = 1, sweep = 1;
+  int has_threads = 0, has_sweep = 0;
 
-  const char *const short_options = "hQqvoHWs:p:e:B:D:Cc:";
+  const char *const short_options = "hQqvoHWs:p:e:B:D:Cc:T:S:";
   const struct option long_options[] = {
       {"help", 0, NULL, 'h'},      {"Quiet", 0, NULL, 'Q'},
       {"quiet", 0, NULL, 'q'},     {"verbose", 0, NULL, 'v'},
@@ -66,6 +72,7 @@ int main(int argc, char *argv[]) {
       {"precision", 1, NULL, 'p'}, {"error_shift", 1, NULL, 'e'},
       {"Bmax", 1, NULL, 'B'},      {"Dmax", 1, NULL, 'D'},
       {"cuda", 0, NULL, 'C'},      {"curves", 1, NULL, 'c'},
+      {"threads", 1, NULL, 'T'},   {"sweep", 1, NULL, 'S'},
       {NULL, 0, NULL, 0}};
 
   program_name = argv[0];
@@ -121,6 +128,14 @@ int main(int argc, char *argv[]) {
     case 'c':
       curves = (unsigned)strtoul(optarg, NULL, 10);
       break;
+    case 'T':
+      threads = (unsigned)strtoul(optarg, NULL, 10);
+      has_threads = 1;
+      break;
+    case 'S':
+      sweep = (unsigned)strtoul(optarg, NULL, 10);
+      has_sweep = 1;
+      break;
     case '?':
       print_usage(stderr, 1);
       break;
@@ -134,20 +149,23 @@ int main(int argc, char *argv[]) {
   /* -Q, -q, neither, -v map onto the library's four verbosity levels. */
   gmpecpp_config_set_verbosity(cfg, Quiet ? 0 : verbose ? 3 : quiet ? 1 : 2);
   gmpecpp_config_set_log(cfg, emit, NULL);
+  if (has_threads)
+    gmpecpp_config_set_threads(cfg, threads);
+  if (has_sweep)
+    gmpecpp_config_set_sweep_threads(cfg, sweep);
   if (use_cuda) {
     gmpecpp_config_set_backend(cfg, GMPECPP_BACKEND_CUDA);
     gmpecpp_config_set_cuda_curves(cfg, curves);
   }
 
   /* Emit the banner and constants first, exactly as the original did,
-   * then prompt, then read.  Without this split the prompt would appear
-   * before the banner.
-   */
+     then prompt, then read.  Without this split the prompt would appear
+     before the banner. */
   gmpecpp_preamble(cfg);
 
   if (!Quiet && !quiet) {
-    (void) fprintf(stdout, "number to be tested:\n");
-    (void) fflush(stdout);
+    printf("number to be tested:\n");
+    fflush(stdout);
   }
 
   char buf[65536];
@@ -155,23 +173,21 @@ int main(int argc, char *argv[]) {
     gmpecpp_config_free(cfg);
     return 5;
   }
-
   buf[strcspn(buf, "\r\n")] = '\0';
 
   gmpecpp_certificate_t *cert = NULL;
   gmpecpp_status_t st = gmpecpp_prove(cfg, buf, &cert);
 
   if (st == GMPECPP_PROVEN_PRIME)
-    (void) fprintf(stdout, "proven prime\n");
+    printf("proven prime\n");
   else if (st == GMPECPP_COMPOSITE || st == GMPECPP_OUT_OF_DISCRIMINANTS ||
            st == GMPECPP_FACTORING_BOUND)
-    (void) fprintf(stdout, "composite\n");
-  (void) fflush(stdout);
+    printf("composite\n");
+  fflush(stdout);
 
   /* Exit codes are the original's: 0 proven, 1 probably prime, 2 both
-   * composite and gave-up.  The library distinguishes the last two; the
-   * tool deliberately does not, for compatibility.
-   */
+     composite and gave-up.  The library distinguishes the last two; the
+     tool deliberately does not, for compatibility. */
   int rc;
   switch (st) {
   case GMPECPP_PROVEN_PRIME:
@@ -189,4 +205,3 @@ int main(int argc, char *argv[]) {
   gmpecpp_config_free(cfg);
   return rc;
 }
-

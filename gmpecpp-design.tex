@@ -64,7 +64,7 @@ cost of everything surrounding it. We reduce the default precision to
 $10^3$ bits after verifying across the thirty-three primes of the committed
 benchmark set, spanning $20$ to $180$ decimal digits, that every input still proves, that no
 loss-of-precision event is triggered, and that no proof becomes slower.
-This alone yields speedups of up to $46.6\times$ on small inputs.
+This alone yields speedups of up to $48.5\times$ on small inputs.
 
 Because CGBN provides fixed-width \emph{integer} arithmetic while the
 class-polynomial layer is arbitrary-precision \emph{floating point}
@@ -84,10 +84,10 @@ shape that ECM rewards.
 Measured on an RTX 4080 Laptop, whole-proof speedups are $1.00$--$1.02\times$
 below sixty decimal digits, where the host already splits cofactors in
 milliseconds, rising to $2.45\times$ at ninety digits, $3.22\times$ at
-one hundred and ten, and $28.4\times$ at one hundred and forty. Across a
+one hundred and ten, and $28.8\times$ at one hundred and forty. Across a
 thirty-six-proof sweep from ninety to one hundred and eighty digits the
 GPU backend is faster in twenty-five runs, with median speedup
-$2.37\times$ and aggregate $2.66\times$. We argue that the aggregate
+$2.41\times$ and aggregate $2.67\times$. We argue that the aggregate
 figure understates the effect, which is better characterised as variance
 reduction: host runtimes span $0.65$ to $51.5$ seconds while
 GPU-assisted runtimes span $0.66$ to $16.4$ seconds. The mechanism is that a discriminant the host
@@ -111,9 +111,25 @@ the two scalar multiplication conditions, and which is itself subjected
 to a negative control. Twenty certificates produced by both backends
 across ten large primes verify successfully.
 
+Finally we examine the prover for shared- and distributed-memory
+parallelism. The downrun is sequential by construction, but two finer
+axes are available and suit different tools. Elliptic curve trials are
+independent and one success ends the search, which is shared-memory work
+with a negligible critical section; threading them yields $5.98\times$
+on thirty-two cores. Discriminants are likewise independent, and a
+speculative parallel sweep -- kept deterministic by seeding each attempt
+from its own discriminant, and kept useful by retaining the smallest
+successful discriminant rather than the first to arrive -- yields
+$1.45\times$ on the same inputs. Across proofs, whole numbers are
+embarrassingly parallel, which suits MPI; we show that neither tool
+suffices alone, since MPI plateaus at $2.63\times$ on a batch bounded by
+its slowest single proof while threads reduce that proof, the hybrid
+reaching $11.0\times$.
+
 The complete system is licensed GPL-3.0-or-later, comprises a shared
-library, a compatible command line tool, a benchmark harness and a
-verifier, and builds with or without CUDA present.
+library, a compatible command line tool, an MPI driver, benchmark
+harnesses and an independent verifier, and builds with or without CUDA
+and MPI present.
 \end{abstract}
 
 \tableofcontents
@@ -283,9 +299,23 @@ historical behaviour.
 
 The prover retains its configuration in file-scope globals. Rather than
 thread a context through some 2\,600 lines of transcribed algorithms, we
-serialise entry points with a mutex: concurrent calls are safe but not
-parallel, and callers requiring throughput should use separate processes.
-This is documented rather than concealed.
+serialise entry points with a mutex: concurrent \emph{calls} are safe but
+not parallel. This is a limitation on inter-call concurrency only; within
+a single call the prover does exploit several cores, as
+Section~\ref{sec:parallel} describes. Callers wanting many proofs at once
+should use separate processes, or the MPI driver.
+
+One piece of state made that possible. Of everything the prover touches,
+\code{gmp\_randstate\_t} is the only object it \emph{mutates} rather than
+merely reads; the transcendental constants and configuration are
+read-only once initialised. We verified the consequence rather than
+assuming it: disjoint \code{mpz} and \code{mpf} operations across
+thirty-two threads, while concurrently reading shared constants, produce
+no discrepancy against a single-threaded reference. Giving each worker
+its own random state is therefore sufficient, and it is installed in a
+thread-local pointer that \code{rand2()} consults, because the call sites
+are buried too deep in the elliptic curve and point-search code to have a
+state threaded through them by hand.
 
 The transcendental constants $\pi$, $e$ and $\ln 1.9$ are computed at
 working precision, which at $10^4$ bits costs approximately $0.4$
@@ -342,10 +372,10 @@ stage-one bound $B_1$ and the number of concurrent curves.
 \toprule
 $B_1$ & 256 curves & 1024 curves & 4096 curves \\
 \midrule
-$10^2$ & 0.022\,s & 0.026\,s & 0.033\,s \\
-$10^3$ & 0.023\,s & 0.024\,s & 0.034\,s \\
-$10^4$ & 0.242\,s & 0.242\,s & 0.346\,s \\
-$5\times10^4$ & 1.119\,s & 1.186\,s & 1.742\,s \\
+$10^2$ & 0.023\,s & 0.026\,s & 0.035\,s \\
+$10^3$ & 0.022\,s & 0.024\,s & 0.033\,s \\
+$10^4$ & 0.227\,s & 0.250\,s & 0.354\,s \\
+$5\times10^4$ & 1.119\,s & 1.257\,s & 1.802\,s \\
 \bottomrule
 \end{tabular}
 \caption{GPU kernel cost. Sixteen-fold increases in curve count cost
@@ -384,22 +414,22 @@ precisions.
 Phase & 30 digits & 60 digits & 100 digits \\
 \midrule
 \multicolumn{4}{l}{\emph{At $10^3$ bits}} \\
-Elliptic curve factorisation & 52.2\% & 98.3\% & 99.5\% \\
-Hilbert class polynomials    & 37.1\% & 1.4\%  & 0.1\% \\
-Total                        & 0.056\,s & 3.598\,s & 18.75\,s \\
+Elliptic curve factorisation & 51.0\% & 98.2\% & 99.5\% \\
+Hilbert class polynomials    & 35.6\% & 1.5\%  & 0.1\% \\
+Total                        & 0.062\,s & 3.859\,s & 19.42\,s \\
 \midrule
 \multicolumn{4}{l}{\emph{At $10^4$ bits}} \\
-Elliptic curve factorisation & 1.0\%  & 28.8\% & 89.9\% \\
-Hilbert class polynomials    & 84.6\% & 67.7\% & 7.7\% \\
-Total                        & 2.923\,s & 12.239\,s & 20.68\,s \\
+Elliptic curve factorisation & 1.0\%  & 28.9\% & 89.8\% \\
+Hilbert class polynomials    & 84.3\% & 67.5\% & 7.8\% \\
+Total                        & 3.015\,s & 12.530\,s & 21.09\,s \\
 \bottomrule
 \end{tabular}
 \caption{Phase distribution against working precision.}
 \label{tab:phases}
 \end{table}
 
-The factoring rows read across as $0.029$, $3.536$, $18.644$ seconds at
-$10^3$ bits against $0.029$, $3.527$, $18.590$ seconds at $10^4$: the
+The factoring rows read across as $0.032$, $3.790$, $19.320$ seconds at
+$10^3$ bits against $0.032$, $3.619$, $18.934$ seconds at $10^4$: the
 absolute cost of factorisation is unchanged, since precision does not
 enter integer arithmetic. What changes is the cost of everything around
 it.
@@ -408,15 +438,203 @@ We therefore reduced the default precision to $10^3$ bits, after
 verifying across the thirty-three primes of the committed benchmark
 set, from $20$ to $180$ decimal digits, that
 every input still proves, that no loss-of-precision event occurs, and
-that no proof becomes slower. Observed speedups range from $46.6\times$ at
+that no proof becomes slower. Observed speedups range from $48.5\times$ at
 thirty digits to $1.1\times$ beyond one hundred, with median
-$1.60\times$. The failure mode this
+$1.70\times$. The failure mode this
 trades against is bounded: insufficient precision causes a
 consistency check on the constant coefficient to fail, whereupon the
 discriminant is abandoned and the sweep continues. It costs time, not
 correctness.
 
+\section{Parallelism}
+\label{sec:parallel}
+
+\subsection{Where it exists, and where it does not}
+
+An ECPP downrun is sequential by construction: step $i+1$ establishes the
+primality of the prime step $i$ produced, and no amount of hardware
+shortens that chain. What the algorithm does offer is the finer axes of
+Table~\ref{tab:axes}, which do not all suit the same tool.
+
+\begin{table}[t]
+\centering
+\begin{tabular}{llrl}
+\toprule
+Site & Independent? & Runtime & Mechanism \\
+\midrule
+ECM curves & fully; first success ends it & 52--99.5\% & POSIX threads \\
+Discriminant sweep & until the first success & $\approx$100\% & POSIX threads \\
+Whole numbers & fully & --- & MPI \\
+$m$ candidates per $D$ & fully & within ECM & unused \\
+$j(\tau)$ per reduced form & fully, then a reduction & 0.1--85\% & unused \\
+Root finding & two subtrees & $<$1\% & not worthwhile \\
+The downrun & \textbf{no} & --- & --- \\
+\bottomrule
+\end{tabular}
+\caption{Parallelism available in the prover.}
+\label{tab:axes}
+\end{table}
+
+\subsection{Elliptic curve trials}
+
+Curves are independent and a single success ends the search, so the
+twenty attempts per bound become twenty concurrent attempts. Each worker
+owns a random state; nothing else the inner loop touches is mutable
+shared state.
+
+\begin{table}[t]
+\centering
+\begin{tabular}{rrr}
+\toprule
+Threads & Total & Speedup \\
+\midrule
+1  & 171.6\,s & 1.00$\times$ \\
+2  & 135.0\,s & 1.27$\times$ \\
+4  &  54.9\,s & 3.12$\times$ \\
+8  &  41.9\,s & 4.09$\times$ \\
+16 &  31.9\,s & 5.38$\times$ \\
+32 &  28.7\,s & \textbf{5.98$\times$} \\
+\bottomrule
+\end{tabular}
+\caption{ECM curve threading over the eighteen primes of ninety digits or
+  more in the benchmark set, thirty-two cores.}
+\label{tab:threads}
+\end{table}
+
+The aggregate in Table~\ref{tab:threads} is sublinear and flattens beyond
+sixteen threads, yet individual inputs routinely exceed the thread count:
+one ninety-digit prime falls from $11.63$ to $2.52$ seconds on two
+threads, and a hundred-and-forty-digit one from $52.63$ to $2.72$ seconds
+on four. Both follow from ECM being a Las Vegas algorithm. Concurrent
+curves finish in the time of the luckiest rather than the average, giving
+large gains exactly where the sequential search was unlucky and none
+where it was not; averaged over a sample that is the column above. The
+flattening arrives once trials past roughly twenty curves per bound are
+purely speculative.
+
+A methodological caution belongs here. An earlier measurement over five
+primes reported $6.96\times$. That figure was not wrong for its sample,
+but a small sample of a high-variance quantity flatters whichever tail it
+catches, and $5.98\times$ over eighteen primes is the defensible number.
+
+\subsection{The discriminant sweep}
+
+Each discriminant is an independent trial and the work beneath one is
+essentially a whole proof step, so a speculative parallel sweep covers
+almost the entire computation. Two design points make it usable rather
+than merely faster.
+
+\paragraph{Determinism.} Every attempt seeds its own random stream from
+the discriminant it tests, making the attempt a pure function of
+$(D, N, \text{seed})$. Results are therefore independent of scheduling:
+thirty-two threads reproduce two threads byte for byte. This is unusual
+for speculative parallelism and worth its small cost.
+
+\paragraph{The smallest discriminant still wins.} Workers draw
+monotonically increasing indices; a success at index $k$ halts new work
+beyond $k$ while in-flight attempts below it finish, and the smallest
+successful index is taken. The sweep therefore selects the discriminant
+the sequential walk would have reached. This matters because a larger
+$|D|$ means a larger class number $h(D)$ and a costlier proof step:
+accepting whichever success arrived first would often choose a worse
+curve and surrender the speedup.
+
+\begin{table}[t]
+\centering
+\begin{tabular}{rrr}
+\toprule
+Threads & Total & Speedup \\
+\midrule
+1  & 172.3\,s & 1.00$\times$ \\
+2  & 133.6\,s & 1.29$\times$ \\
+4  & 122.3\,s & 1.41$\times$ \\
+8  & 119.9\,s & 1.44$\times$ \\
+16 & 118.7\,s & 1.45$\times$ \\
+32 & 118.5\,s & \textbf{1.45$\times$} \\
+\bottomrule
+\end{tabular}
+\caption{Discriminant sweep threading, same inputs as
+  Table~\ref{tab:threads}.}
+\label{tab:sweep}
+\end{table}
+
+At $1.45\times$ against $5.98\times$ on identical inputs this is
+substantially weaker, for structural reasons rather than defects of
+implementation. Most inputs succeed on one of the first few
+discriminants, leaving little sweep to parallelise; and because the
+smallest success is retained, every other worker's output is discarded.
+That discarding is the design, not waste to be optimised away: it is what
+buys the cheaper curve.
+
+The distribution is accordingly bimodal. Where the sweep is long the gain
+is large -- $52.98$ to $23.68$ seconds at a hundred and forty digits,
+$19.08$ to $10.14$ at a hundred -- while inputs whose first discriminant
+already worked lose a few to twenty percent to thread creation. An
+earlier version lost far more, turning $0.66$ seconds into $2.29$; the
+smallest few discriminants are now probed on the calling thread before
+any fan-out, which is free in the parallel case.
+
+\subsection{Distributed batches, and why neither tool suffices}
+
+Whole numbers are embarrassingly parallel with no communication until the
+end, which is what MPI is for. Work is dispatched dynamically rather than
+partitioned in advance, because proof times vary by two orders of
+magnitude between neighbouring inputs and a static division strands most
+ranks behind one straggler.
+
+\begin{table}[t]
+\centering
+\begin{tabular}{lrr}
+\toprule
+Configuration & Wall & Speedup \\
+\midrule
+1 rank, 1 thread   & 53.78\,s & 1.00$\times$ \\
+5 ranks, 1 thread  & 20.47\,s & 2.63$\times$ \\
+9 ranks, 1 thread  & 20.45\,s & 2.63$\times$ \\
+5 ranks, 4 threads &  5.68\,s & 9.47$\times$ \\
+9 ranks, 4 threads &  4.89\,s & \textbf{11.00$\times$} \\
+\bottomrule
+\end{tabular}
+\caption{Ten primes of ninety to a hundred and ten digits.}
+\label{tab:mpi}
+\end{table}
+
+Table~\ref{tab:mpi} carries the argument for combining the mechanisms
+rather than choosing between them. MPI plateaus at $2.63\times$ and
+ranks beyond five change nothing: a batch's wall time is bounded below by
+its slowest single proof, and no number of ranks divides one proof.
+Threads do, because they operate inside it, so the hybrid reaches
+$11.0\times$ where either tool alone stalls.
+
+\subsection{Two defects, and what found them}
+
+Both are recorded because each was invisible to the obvious test.
+
+\paragraph{Flags surviving a step.} The success flags live in the downrun
+driver but were cleared inside the loop body that became the
+per-discriminant function. A sweep finding nothing therefore inherited
+the previous step's success and continued with its stale curve; a
+hundred-and-forty-digit proof ran two hundred and fifty-seven steps and
+emitted a certificate failing every check. The regression matrix of four
+small inputs could not detect this, since the fault requires a downrun
+long enough for some sweep to fail. That matrix now has a mode replaying
+every prime in the benchmark set, which does.
+
+\paragraph{\code{volatile} mistaken for synchronisation.} The shared
+found-flags were declared \code{volatile}, read every iteration and
+written once. \code{volatile} orders nothing and the pair is a data race
+whatever a given architecture does in practice; ThreadSanitizer
+identified it. Both are atomics now, and the sanitiser reports no races
+across either threaded stage.
+
+\paragraph{Defaults.} Both mechanisms default to a single thread and
+reproduce the historical program byte for byte. Above one they alter
+which factor is discovered, so certificates differ legitimately and are
+checked with the verifier of Section~\ref{sec:verify} rather than
+compared.
+
 \section{Verification}
+\label{sec:verify}
 
 Byte-comparison against the historical program is a sound correctness
 criterion only while the GPU is not engaged. Above the escalation
@@ -456,12 +674,12 @@ CUDA 12.9, GCC 14.3.1 at \code{-O2}, with the seed pinned.
 Digits & Host & GPU & Speedup & Host ECM & GPU ECM \\
 \midrule
 20  & 0.006\,s  & 0.006\,s & 1.02$\times$ & 0.003\,s & 0.003\,s \\
-30  & 0.089\,s  & 0.084\,s & 1.06$\times$ & 0.052\,s & 0.050\,s \\
-40  & 0.133\,s  & 0.133\,s & 1.00$\times$ & 0.120\,s & 0.120\,s \\
-60  & 0.161\,s  & 0.161\,s & 1.00$\times$ & 0.122\,s & 0.122\,s \\
-90  & 2.090\,s  & 0.853\,s & 2.45$\times$ & 1.999\,s & 0.780\,s \\
-110 & 5.064\,s  & 1.566\,s & 3.23$\times$ & 4.909\,s & 1.450\,s \\
-140 & 52.292\,s & 1.840\,s & 28.42$\times$ & 52.132\,s & 1.674\,s \\
+30  & 0.086\,s  & 0.085\,s & 1.02$\times$ & 0.050\,s & 0.051\,s \\
+40  & 0.135\,s  & 0.137\,s & 0.99$\times$ & 0.123\,s & 0.124\,s \\
+60  & 0.169\,s  & 0.166\,s & 1.02$\times$ & 0.128\,s & 0.127\,s \\
+90  & 2.105\,s  & 0.860\,s & 2.45$\times$ & 2.014\,s & 0.787\,s \\
+110 & 5.169\,s  & 1.614\,s & 3.20$\times$ & 5.008\,s & 1.490\,s \\
+140 & 53.446\,s & 1.855\,s & 28.81$\times$ & 53.283\,s & 1.687\,s \\
 \bottomrule
 \end{tabular}
 \caption{Whole-proof timings. The final two columns confirm that the
@@ -471,13 +689,13 @@ Digits & Host & GPU & Speedup & Host ECM & GPU ECM \\
 
 Over a thirty-six-proof sweep covering every prime of ninety digits or
 more in the committed benchmark data, at two seeds each, the GPU backend
-is faster in twenty-five runs, with median speedup $2.37\times$, range
-$0.47\times$ to $26.3\times$, and aggregate $322.1 \to 121.1$ seconds,
-or $2.66\times$.
+is faster in twenty-five runs, with median speedup $2.41\times$, range
+$0.48\times$ to $26.7\times$, and aggregate $329.7 \to 123.3$ seconds,
+or $2.67\times$.
 
 The aggregate understates the phenomenon. Host runtimes across that sweep
-span $0.65$ to $51.5$ seconds; GPU-assisted runtimes span $0.66$ to
-$16.4$ seconds. The effect is best described as variance reduction: the backend
+span $0.67$ to $52.7$ seconds; GPU-assisted runtimes span $0.67$ to
+$16.8$ seconds. The effect is best described as variance reduction: the backend
 does not uniformly accelerate proofs so much as eliminate pathological
 ones, in which the host's twenty curves per bound labour against a
 cofactor that thousands of curves split at once. Every run in which the
@@ -500,8 +718,24 @@ stage two would extend its reach further. The exception introduced in
 place of \code{exit(2)} unwinds frames holding raw GMP temporaries, which
 leak on that path; the path is reached only for composite inputs, but the
 defect should be addressed before the library is applied to many
-composites in one process. Finally, the serialisation of API entry points
-precludes intra-process parallelism.
+composites in one process.
+
+The serialisation of API entry points remains, so a single process cannot
+have two proofs in flight; within one proof it does use many cores, but
+callers wanting concurrent proofs need separate processes or the MPI
+driver. Removing that restriction means threading a context through the
+file-scope globals, which is the same refactor the prover has resisted
+since it was a single translation unit.
+
+Two parallel axes identified in Table~\ref{tab:axes} are unexploited.
+The $m$ candidates for a given discriminant, of which there are between
+two and six, are independent factoring attempts; the fan-out is small and
+the sequential form short-circuits, so the gain is bounded. More
+promising is the class polynomial layer, which is a map over reduced
+forms followed by a reduction, with each $j(\tau)$ evaluation expensive
+and independent. It is worth doing at high precision, where that layer
+dominates; at the working default it is a tenth of a percent to a third
+of runtime and the factoring stage is the better target.
 
 \section*{Acknowledgements}
 

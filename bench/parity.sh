@@ -1,4 +1,5 @@
 #!/bin/bash
+
 # parity -- is the library-backed tool still the original program?
 #
 # Compares stdout, stderr and exit status against a reference build of
@@ -9,6 +10,7 @@
 # Above the gate byte comparison is the WRONG test -- the GPU finds
 # different factorisations and so different, equally valid certificates.
 # Use gmpecpp-verify for that regime.
+
 set -u
 REF=${REF:-/tmp/gmp-ecpp-reference}
 SRC=${SRC:-gmp-ecpp.cpp}
@@ -18,6 +20,26 @@ EXTRA=${EXTRA:-}          # e.g. EXTRA=-C to check the backend is inert
 if [ ! -x "$REF" ]; then
   echo "building reference from $SRC"
   g++ -O2 -w -o "$REF" "$SRC" -lgmpxx -lgmp || exit 1
+fi
+
+# DEEP=1 additionally replays every prime in bench/primes.txt. The small
+# matrix below misses regressions that only appear once the downrun runs
+# many steps -- a stale flag between steps stayed hidden until a
+# 140-digit input exposed it.
+if [ "${DEEP:-0}" = 1 ]; then
+  n=0; fail=0
+  while read -r d v; do
+    case "$d" in \#*|"") continue;; esac
+    a=$(echo "$v" | "$REF" -Q -s 1 2>&1; echo "rc=$?")
+    b=$(echo "$v" | "$BIN" $EXTRA -Q -s 1 2>&1; echo "rc=$?")
+    n=$((n+1))
+    if [ "$a" != "$b" ]; then
+      fail=$((fail+1)); echo "MISMATCH ${d}-digit ${v:0:20}..."
+    fi
+  done < "${DATA:-bench/primes.txt}"
+  echo "=== deep: $n primes, $fail mismatches ==="
+  [ "$fail" = 0 ] || exit 1
+  exit 0
 fi
 
 FLAGS=("-Q" "-q" "" "-Q -H" "-Q -W" "-Q -o" "-Q -p 2000" "-q -p 1500"

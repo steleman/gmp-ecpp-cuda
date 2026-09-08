@@ -8,13 +8,15 @@
 CXX      = /usr/bin/g++
 CC       = /usr/bin/gcc
 CPPFLAGS = -D_GNU_SOURCE -D_XOPEN_SOURCE=700
+# Uncomment this if you want extra debugging messages
+# CPPFLAGS += GMPECPP_DEBUG
 CXXFLAGS = -O3 -Wall -Wextra -std=c++17
 CFLAGS   = -O3 -Wall -std=c17
 
 # Conventional order, C++ wrapper before the C library. Irrelevant for
 # the shared libs (libgmpxx.so has a NEEDED entry on libgmp.so), but
 # required if these are ever linked as static archives.
-LDLIBS := -lgmpxx -lgmp
+LDLIBS := -lgmpxx -lgmp -lpthread
 
 # ---------------------------------------------------------------- #
 # CUDA / CGBN                                                       #
@@ -24,6 +26,24 @@ LDLIBS := -lgmpxx -lgmp
 # prover is either sequential or arbitrary precision floating point,
 # which CGBN (fixed width integer) cannot express. Set CUDA=0 to force a
 # CPU-only build.
+
+# ---------------------------------------------------------------- #
+# MPI (optional)                                                    #
+# ---------------------------------------------------------------- #
+#
+# Used only by gmpecpp-mpi, which distributes a batch of numbers across
+# ranks. A single ECPP downrun is sequential and offers nothing to
+# distribute; see README.md.
+
+MPICC ?= $(shell command -v mpicc 2>/dev/null || \
+           ls /usr/lib64/openmpi/bin/mpicc 2>/dev/null || echo mpicc)
+MPI   ?= $(if $(wildcard $(MPICC)),1,$(shell command -v $(MPICC) >/dev/null 2>&1 && echo 1 || echo 0))
+
+ifeq ($(MPI),1)
+  MPI_TARGET := gmpecpp-mpi
+else
+  MPI_TARGET :=
+endif
 
 NVCC      ?= $(shell command -v nvcc 2>/dev/null || echo /usr/local/cuda/bin/nvcc)
 CUDA_ARCH ?= sm_89
@@ -67,11 +87,11 @@ VERIFY  := gmpecpp-verify
 
 SEED ?= 1
 
-.PHONY: all clean check bench bench-all bench-reach bench-kernel \
+.PHONY: all clean check bench bench-all bench-reach bench-kernel bench-threads bench-sweep \
         bench-precision bench-cuda bench-profile parity verify-all \
         doc format help cuda-info
 
-all: $(LIB) $(BIN) $(BENCH) $(REACH) $(KERNEL) $(VERIFY)
+all: $(LIB) $(BIN) $(BENCH) $(REACH) $(KERNEL) $(VERIFY) $(MPI_TARGET)
 
 build:
 	@mkdir -p build
@@ -81,8 +101,7 @@ build/gmpecpp.o: src/gmpecpp.cpp include/gmpecpp.h | build
 	  -Iinclude -c $< -o $@
 
 build/ecm_stub.o: src/ecm_stub.cpp | build
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -fPIC \
-	  -Iinclude -c $< -o $@
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -fPIC -Iinclude -c $< -o $@
 
 build/ecm_cuda.o: src/ecm_cuda.cu | build
 	$(NVCC) $(NVCCFLAGS) -Xcompiler -fPIC -I$(CGBN_INC) -Iinclude -c $< -o $@
@@ -106,6 +125,12 @@ $(BENCH): bench/gmpecpp-bench.c $(LIB)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Iinclude -o $@ $< \
 	  -L. -lgmpecpp -Wl,-rpath,'$$ORIGIN' $(CUDA_RPATH)
 
+# MPI + POSIX threads: ranks take whole numbers, threads split the ECM
+# curves inside each. Built only when an MPI compiler is present.
+gmpecpp-mpi: tools/gmpecpp-mpi.c $(LIB)
+	$(MPICC) $(CPPFLAGS) $(CFLAGS) -Iinclude -o $@ $< \
+	  -L. -lgmpecpp -Wl,-rpath,'$$ORIGIN' $(CUDA_RPATH)
+
 $(REACH): bench/ecm-reach.c $(LIB)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Iinclude -o $@ $< \
 	  -L. -lgmpecpp -Wl,-rpath,'$$ORIGIN' $(CUDA_RPATH)
@@ -116,8 +141,9 @@ $(KERNEL): bench/kernel-latency.c $(LIB)
 
 clean:
 	rm -rf build $(LIB) $(SONAME) $(LIB_SO) $(BIN) $(BENCH) $(REACH) \
-	  $(KERNEL) $(VERIFY)
-	rm -f doc/*.aux doc/*.log doc/*.out doc/*.toc
+	  $(KERNEL) $(VERIFY) gmpecpp-mpi
+	rm -f gmpecpp-design.aux gmpecpp-design.log gmpecpp-design.out \
+	  gmpecpp-design.toc
 
 # Reformats in place per .clang-format. Note that clang-format 19 skips
 # the construct following any function whose return type is an
@@ -127,15 +153,31 @@ format:
 	clang-format -style=file -i src/gmpecpp.cpp include/gmpecpp.h \
 	  tools/gmp-ecpp.cpp bench/gmpecpp-bench.c
 
-# The article. Needs pdflatex; three passes for the table of contents.
+# The design document. Needs pdflatex; three passes for the table of
+# contents and cross-references.
+#
+# pdflatex stamps /CreationDate and /ModDate into the PDF, so an
+# unchanged document rebuilt a minute later differs in 64 bytes and shows
+# up as modified in git. SOURCE_DATE_EPOCH (TeX Live 2016 and later)
+# pins those, making the build byte-reproducible; FORCE_SOURCE_DATE makes
+# \today follow it too, which matters if the explicit \date is ever
+# removed. The default is the document's own last commit, so the stamp
+# means something; override it, or set it to 0, if you prefer.
+SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct -- gmpecpp-design.tex \
+                       2>/dev/null || echo 0)
+
 doc: gmpecpp-design.pdf
 
 gmpecpp-design.pdf: gmpecpp-design.tex
-	pdflatex -interaction=nonstopmode -halt-on-error gmpecpp-design.tex \
-	  && pdflatex -interaction=nonstopmode -halt-on-error gmpecpp-design.tex \
-	  && pdflatex -interaction=nonstopmode -halt-on-error gmpecpp-design.tex
+	SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) FORCE_SOURCE_DATE=1 \
+	  pdflatex -interaction=nonstopmode -halt-on-error gmpecpp-design.tex \
+	  && SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) FORCE_SOURCE_DATE=1 \
+	  pdflatex -interaction=nonstopmode -halt-on-error gmpecpp-design.tex \
+	  && SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) FORCE_SOURCE_DATE=1 \
+	  pdflatex -interaction=nonstopmode -halt-on-error gmpecpp-design.tex
 
 cuda-info:
+	@echo "MPI         : $(MPI) ($(MPICC))"
 	@echo "CUDA        : $(CUDA)"
 	@echo "NVCC        : $(NVCC)"
 	@echo "CUDA_ARCH   : $(CUDA_ARCH)"
@@ -201,6 +243,14 @@ bench-precision: $(BIN)
 bench-cuda: $(BIN)
 	bash bench/cuda-sweep.sh
 
+# How the ECM stage scales with POSIX threads. Minutes.
+bench-threads: $(BIN)
+	bash bench/thread-sweep.sh
+
+# How the discriminant sweep scales. Minutes.
+bench-sweep: $(BIN)
+	bash bench/sweep-threads.sh
+
 # Where the time actually goes. Pass -p to profile at another precision.
 bench-profile: $(BIN)
 	python3 bench/profile-phases.py -p 1000
@@ -216,7 +266,8 @@ parity: $(BIN)
 verify-all: $(BIN) $(VERIFY)
 	bash bench/verify-both.sh
 
-bench-all: bench bench-reach bench-kernel bench-profile bench-precision bench-cuda
+bench-all: bench bench-reach bench-kernel bench-profile bench-precision \
+           bench-cuda bench-threads bench-sweep
 
 help:
 	@echo "make            build $(LIB), ./$(BIN) and ./$(BENCH)"
@@ -227,16 +278,23 @@ help:
 	@echo "make bench-profile   per-phase time at 1000 and 10000 bits"
 	@echo "make bench-precision precision sweep (minutes)"
 	@echo "make bench-cuda      CPU vs CUDA sweep (many minutes)"
+	@echo "make bench-threads   ECM scaling with POSIX threads"
+	@echo "make bench-sweep     discriminant sweep scaling"
 	@echo "make bench-all       all of the above"
 	@echo "make parity          byte-identity vs the original program"
 	@echo "make verify-all      certificates from both backends"
 	@echo "./$(VERIFY) [-C] [-v] N   prove N and check the certificate"
 	@echo "make clean      remove build artefacts"
-	@echo "make doc        build doc/gmpecpp.pdf (needs pdflatex)"
+	@echo "make doc        build gmpecpp-design.pdf (byte-reproducible)"
 	@echo "make format     clang-format the sources"
 	@echo "make cuda-info  show the detected CUDA configuration"
 	@echo
-	@echo "CUDA=0 forces a CPU-only build; it is auto-detected otherwise."
+	@echo "CUDA=0 forces a CPU-only build; MPI=0 skips gmpecpp-mpi."
+	@echo "Both are auto-detected otherwise."
+	@echo
+	@echo "Parallelism:  ./gmp-ecpp -T N   ECM worker threads (0 = one per CPU)"
+	@echo "              ./gmp-ecpp -S N   discriminant sweep threads"
+	@echo "              mpirun -n R ./gmpecpp-mpi -T N file   batch across ranks"
 	@echo "The number under test is read from stdin, not argv:"
 	@echo "    echo 1000000000000000000000000000057 | ./$(BIN) -Q"
 

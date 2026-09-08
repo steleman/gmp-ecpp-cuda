@@ -1,10 +1,12 @@
 #!/bin/bash
+
 # verify-both -- prove with each backend and check both certificates.
 #
 # This is the correct correctness test above the CUDA size gate, where
 # the two backends legitimately produce different certificates.  Watch
 # the step counts: a discriminant the host abandons is one the GPU can
 # use, so GPU proofs are often shorter as well as faster.
+
 set -u
 VERIFY=${VERIFY:-./gmpecpp-verify}
 DATA=${DATA:-bench/primes.txt}

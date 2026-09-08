@@ -253,8 +253,7 @@ int32_t addition_1(mpz_class n, struct point P1, struct point P2,
 
 // affine coords
 // P1 == P2
-void addition_2(mpz_class a, mpz_class n, struct point P1,
-                struct point *P3) {
+void addition_2(mpz_class a, mpz_class n, struct point P1, struct point *P3) {
   mpz_class m;
 
   // calculate m = (3x1 ^ 2 + a)(2y1) ^ -1 mod n
@@ -2139,9 +2138,9 @@ bool find_curve(int32_t type, mpz_class *a, mpz_class *b, int64_t D,
 
     if (!Quiet) {
       std::cout << "D = " << D << ", dT = " << dT << ", T = ";
-      (void) fflush(stdout);
+      fflush(stdout);
       zpoly_print(dT, T);
-      (void) fflush(stdout);
+      fflush(stdout);
     }
 
     mpz_class SmallestCoeff, Root3;
@@ -2149,7 +2148,7 @@ bool find_curve(int32_t type, mpz_class *a, mpz_class *b, int64_t D,
     if (cube_test(SmallestCoeff, &Root3) == 0) {
       if (!Quiet) {
         std::cout << "HCP loss of precision\n";
-        (void) fflush(stdout);
+        fflush(stdout);
       }
       *rootSize = 0;
       goto clear_variables;
@@ -2161,9 +2160,9 @@ bool find_curve(int32_t type, mpz_class *a, mpz_class *b, int64_t D,
 
     if (!Quiet) {
       std::cout << "D = " << D << ", dW = " << dT << ", W = ";
-      (void) fflush(stdout);
+      fflush(stdout);
       zpoly_print(dT, T);
-      (void) fflush(stdout);
+      fflush(stdout);
     }
 
     mpz_class SmallestCoeff;
@@ -2171,7 +2170,7 @@ bool find_curve(int32_t type, mpz_class *a, mpz_class *b, int64_t D,
     if (poweroftwo_test(SmallestCoeff) == false) {
       if (!Quiet) {
         std::cout << "WCP loss of precision\n";
-        (void) fflush(stdout);
+        fflush(stdout);
       }
       *rootSize = 0;
       goto clear_variables;
@@ -2229,7 +2228,7 @@ int32_t Atkin(mpz_class N) {
       while (p <= sqrt(Ni)) {
         if (Ni % p == 0) {
           std::cout << "1 factor = " << p << "\n";
-          (void) fflush(stdout);
+          fflush(stdout);
           return 2;
         }
         p++;
@@ -2245,7 +2244,7 @@ int32_t Atkin(mpz_class N) {
       if (!Quiet) {
         std::cout << "Bmax = " << Bmax << "\n";
         std::cout << "Dmax = " << Dmax << "\n";
-        (void) fflush(stdout);
+        fflush(stdout);
       }
 
       n = 1;
@@ -2260,7 +2259,7 @@ int32_t Atkin(mpz_class N) {
 
         if (verbose) {
           std::cout << D << '\r';
-          (void) fflush(stdout);
+          fflush(stdout);
         }
 
         //  std::cout << "Step 3\n";
@@ -2318,7 +2317,7 @@ int32_t Atkin(mpz_class N) {
 
               if (!Quiet) {
                 std::cout << "j = " << j << "\n";
-                (void) fflush(stdout);
+                fflush(stdout);
               }
 
               mpz_class c;
@@ -2332,7 +2331,7 @@ int32_t Atkin(mpz_class N) {
 
               if (!Quiet) {
                 std::cout << "u = " << w << "\n";
-                (void) fflush(stdout);
+                fflush(stdout);
               }
 
               if (D % 4 == 0)
@@ -2342,7 +2341,7 @@ int32_t Atkin(mpz_class N) {
 
               if (!Quiet) {
                 std::cout << "j = " << j << "\n";
-                (void) fflush(stdout);
+                fflush(stdout);
               }
 
               mpz_class c;
@@ -2396,7 +2395,7 @@ int32_t Atkin(mpz_class N) {
 
                 if (value2 == 1) {
                   std::cout << "3 factor = " << d << "\n";
-                  (void) fflush(stdout);
+                  fflush(stdout);
                   return 2;
                 }
 
@@ -2404,7 +2403,7 @@ int32_t Atkin(mpz_class N) {
 
                 if (value1 == 1) {
                   std::cout << "2 factor = " << d << "\n";
-                  (void) fflush(stdout);
+                  fflush(stdout);
                   return 2;
                 }
 
@@ -2470,14 +2469,14 @@ int32_t Atkin(mpz_class N) {
     if (Dmax > 312500) {
       if (!Quiet) {
         std::cout << "ProvePrime: ran out of discriminants\n";
-        (void) fflush(stdout);
+        fflush(stdout);
       }
       return 2;
     }
     if (Bmax > 2000000000) {
       if (!Quiet) {
         std::cout << "ProvePrime: exceeded maximum factoring bounds\n";
-        (void) fflush(stdout);
+        fflush(stdout);
       }
       return 2;
     }
@@ -2491,7 +2490,7 @@ int32_t Atkin(mpz_class N) {
     std::cout << "P1 = (" << P1.x << ", " << P1.y << ")\n";
     std::cout << "P2 = (" << P2.x << ", " << P2.y << ")\n";
 
-    (void) fflush(stdout);
+    fflush(stdout);
 
     i++;
     Ni = q;
@@ -2636,7 +2635,7 @@ int main(int32_t argc, char *argv[]) {
     std::cout << "random seed = " << seed << "\n";
     std::cout << "error_shift = " << error_shift << "\n";
     std::cout << "precision = " << precision << "\n";
-    (void) fflush(stdout);
+    fflush(stdout);
   }
 
   mpz_class N;
@@ -2702,15 +2701,15 @@ int main(int32_t argc, char *argv[]) {
     std::cout << "PI = ";
     print_mpf(PIf);
     std::cout << "\n";
-    (void) fflush(stdout);
+    fflush(stdout);
     std::cout << "E = ";
     print_mpf(Ef);
     std::cout << "\n";
-    (void) fflush(stdout);
+    fflush(stdout);
     std::cout << "NATLOGONEPOINTNINE = ";
     print_mpf(NATLOGONEPOINTNINEf);
     std::cout << "\n";
-    (void) fflush(stdout);
+    fflush(stdout);
   }
 
   if (verbose) {
@@ -2727,9 +2726,9 @@ int main(int32_t argc, char *argv[]) {
           continue;
         Hilbert(D, CP, &dCP);
         std::cout << "D = " << D << ", dT = " << dCP << ", T = ";
-        (void) fflush(stdout);
+        fflush(stdout);
         zpoly_print(dCP, CP);
-        (void) fflush(stdout);
+        fflush(stdout);
       }
     }
     if (weber) {
@@ -2744,19 +2743,19 @@ int main(int32_t argc, char *argv[]) {
           Weber(D, CP, &dCP);
         if (D % 32 != 0)
           std::cout << "D = " << D << ", dW = " << dCP << ", W = ";
-        (void) fflush(stdout);
+        fflush(stdout);
         zpoly_print(dCP, CP);
-        (void) fflush(stdout);
+        fflush(stdout);
       }
     }
 
     std::cout << "\n";
-    (void) fflush(stdout);
+    fflush(stdout);
   }
 
   if (!Quiet && !quiet) {
     std::cout << "number to be tested:\n";
-    (void) fflush(stdout);
+    fflush(stdout);
   }
 
   std::cin >> N;
@@ -2768,8 +2767,7 @@ int main(int32_t argc, char *argv[]) {
       std::cout << ("composite\n");
     }
   }
-  (void) fflush(stdout);
+  fflush(stdout);
 
   return result;
 }
-

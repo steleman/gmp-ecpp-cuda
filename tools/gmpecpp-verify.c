@@ -1,12 +1,4 @@
 /*
- * Copyright (C) 2023-2026 Stefan Teleman.
- *
- * Licensed under the GPLv3 License.
- * See https://opensource.org/license/gpl-3.0
- * SPDX-License-Identifier: GPL-3.0
- */
-
-/*
  * gmpecpp-verify -- independently check a certificate produced by
  * libgmpecpp.
  *
@@ -167,11 +159,14 @@ static void quiet(const char *m, void *u) { (void)m; (void)u; }
 
 int main(int argc, char **argv) {
   int use_cuda = 0, verbose = 0, selftest = 0, i;
+  unsigned threads = 1, sweep = 1;
   const char *num = NULL;
   for (i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "-C")) use_cuda = 1;
     else if (!strcmp(argv[i], "-v")) verbose = 1;
     else if (!strcmp(argv[i], "--selftest")) selftest = 1;
+    else if (!strcmp(argv[i], "-T") && i + 1 < argc) threads = (unsigned)strtoul(argv[++i], NULL, 10);
+    else if (!strcmp(argv[i], "-S") && i + 1 < argc) sweep = (unsigned)strtoul(argv[++i], NULL, 10);
     else num = argv[i];
   }
   if (!num) { fprintf(stderr, "usage: %s [-C] [-v] <number>\n", argv[0]); return 1; }
@@ -181,10 +176,12 @@ int main(int argc, char **argv) {
   gmpecpp_config_set_verbosity(cfg, 0);
   gmpecpp_config_set_log(cfg, quiet, NULL);
   if (use_cuda) gmpecpp_config_set_backend(cfg, GMPECPP_BACKEND_CUDA);
+  gmpecpp_config_set_threads(cfg, threads);
+  gmpecpp_config_set_sweep_threads(cfg, sweep);
 
   gmpecpp_certificate_t *cert = NULL;
   gmpecpp_status_t st = gmpecpp_prove(cfg, num, &cert);
-  printf("%s: %s (%zu steps, %.2fs, %s)\n", use_cuda ? "CUDA" : "CPU ",
+  printf("%s T=%-2u: %s (%zu steps, %.2fs, %s)\n", use_cuda ? "CUDA" : "CPU ", threads,
          gmpecpp_status_string(st), gmpecpp_certificate_num_steps(cert),
          gmpecpp_certificate_elapsed(cert),
          gmpecpp_certificate_backend(cert) == GMPECPP_BACKEND_CUDA ? "gpu" : "cpu");
@@ -211,4 +208,3 @@ int main(int argc, char **argv) {
   gmpecpp_config_free(cfg);
   return rc;
 }
-

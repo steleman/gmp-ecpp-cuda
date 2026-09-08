@@ -192,21 +192,24 @@ settings. **Every one proves at either precision, and none is slower at
 
 | Digits | `-p 1000` | `-p 10000` | Ratio |
 |---:|---:|---:|---:|
-| 20 | 0.02 s | 0.44 s | 29.2× |
-| 30 | 0.06 s | 2.91 s | **46.6×** |
-| 40 | 0.27 s | 2.50 s | 9.3× |
-| 50 | 0.16 s | 3.01 s | 18.4× |
-| 60 | 3.59 s | 12.18 s | 3.4× |
-| 80 | 0.91 s | 6.82 s | 7.5× |
-| 90 | 11.41 s | 21.27 s | 1.9× |
-| 100 | 18.63 s | 20.56 s | 1.1× |
-| 110 | 4.99 s | 10.67 s | 2.1× |
-| 140 | 51.44 s | 60.37 s | 1.2× |
-| 150 | 25.59 s | 30.98 s | 1.2× |
-| 180 | 14.73 s | 17.71 s | 1.2× |
+| 20 | 0.02s | 0.43s | 26.6× |
+| 30 | 0.06s | 3.00s | 48.5× |
+| 40 | 0.26s | 2.55s | 9.7× |
+| 50 | 0.17s | 3.08s | 18.4× |
+| 60 | 3.66s | 12.49s | 3.4× |
+| 70 | 0.27s | 0.69s | 2.5× |
+| 80 | 0.93s | 6.96s | 7.4× |
+| 90 | 1.22s | 1.65s | 1.4× |
+| 100 | 19.06s | 21.13s | 1.1× |
+| 110 | 5.08s | 10.91s | 2.1× |
+| 120 | 4.97s | 7.89s | 1.6× |
+| 130 | 7.12s | 11.88s | 1.7× |
+| 140 | 52.51s | 61.58s | 1.2× |
+| 150 | 25.97s | 31.61s | 1.2× |
+| 180 | 14.99s | 18.05s | 1.2× |
 
-Across all 33: median **1.60×**, range 1.1× to 46.6×, aggregate
-258.6 s → 177.3 s.
+Across all 33: median **1.70×**, range 1.1× to 48.5×, aggregate
+263.9 s → 180.5 s.
 
 The advantage is dramatic on small inputs and narrows to a few tens of
 percent past a hundred digits, because the time then goes to factoring
@@ -359,20 +362,20 @@ strongly on `-p`, which is why the default matters so much:
 | Phase | 30 digits | 60 digits | 100 digits |
 |---|---:|---:|---:|
 | **At `-p 1000` (the default)** | | | |
-| ECM factoring | 52.2% | 98.3% | 99.5% |
-| Hilbert class polynomials | 37.1% | 1.4% | 0.1% |
-| everything else | 9.4% | 0.3% | 0.4% |
-| total | 0.056 s | 3.598 s | 18.746 s |
+| ECM factoring | 51.0% | 98.2% | 99.5% |
+| Hilbert class polynomials | 35.6% | 1.5% | 0.1% |
+| everything else | 12.4% | 0.3% | 0.4% |
+| total | 0.062 s | 3.859 s | 19.423 s |
 | **At `-p 10000`** | | | |
-| ECM factoring | 1.0% | 28.8% | 89.9% |
-| Hilbert class polynomials | 84.6% | 67.7% | 7.7% |
-| everything else | 14.4% | 3.5% | 2.4% |
-| total | 2.923 s | 12.239 s | 20.677 s |
+| ECM factoring | 1.0% | 28.9% | 89.8% |
+| Hilbert class polynomials | 84.3% | 67.5% | 7.8% |
+| everything else | 14.7% | 3.6% | 2.4% |
+| total | 3.015 s | 12.530 s | 21.085 s |
 
 Regenerate with `make bench-profile`.
 
-Read the ECM rows across: **0.029s, 3.536s, 18.644s** at 1000 bits versus
-**0.029s, 3.527s, 18.590s** at 10000. ECM's absolute cost is unchanged,
+Read the ECM rows across: **0.032s, 3.790s, 19.320s** at 1000 bits versus
+**0.032s, 3.619s, 18.934s** at 10000. ECM's absolute cost is unchanged,
 because it is integer work and precision does not touch it. What changed
 is everything around it — lowering the default made polynomial
 construction cheap, and that is what turned ECM into the thing a proof
@@ -408,10 +411,10 @@ and barely notices how many curves you ask for:
 
 | B1 | 256 curves | 1024 curves | 4096 curves |
 |---:|---:|---:|---:|
-| 100 | 0.022 s | 0.026 s | 0.033 s |
-| 1 000 | 0.023 s | 0.024 s | 0.034 s |
-| 10 000 | 0.242 s | 0.242 s | 0.346 s |
-| 50 000 | 1.119 s | 1.186 s | 1.742 s |
+| 100 | 0.023 s | 0.026 s | 0.035 s |
+| 1 000 | 0.022 s | 0.024 s | 0.033 s |
+| 10 000 | 0.227 s | 0.250 s | 0.354 s |
+| 50 000 | 1.119 s | 1.257 s | 1.802 s |
 
 Sixteen times the curves for 1.4× the time. Cost is reported as the GPU's
 marginal contribution, measured as a CUDA run minus a host-only run of
@@ -437,7 +440,7 @@ All figures below were measured on:
 | Settings | seed pinned to 1, default precision, `-c 4096 -b 50000` |
 
 Reproduce them with `make bench`. Run-to-run variation is a percent or
-two — a repeat of the table below gave 28.27× where it says 28.52× — so
+two — three runs of the table below gave 28.52×, 28.42× and 28.81× — so
 treat the small differences as noise and the large ones as real. Reruns
 are only comparable at a pinned seed.
 
@@ -445,13 +448,13 @@ are only comparable at a pinned seed.
 
 | Digits | CPU | CUDA | Speedup | CPU ECM | CUDA ECM |
 |---:|---:|---:|---:|---:|---:|
-| 20 | 0.006 s | 0.006 s | 1.02× | 0.003 s | 0.003 s |
-| 30 | 0.089 s | 0.084 s | 1.06× | 0.052 s | 0.050 s |
-| 40 | 0.133 s | 0.133 s | 1.00× | 0.120 s | 0.120 s |
-| 60 | 0.161 s | 0.161 s | 1.00× | 0.122 s | 0.122 s |
-| 90 | 2.090 s | 0.853 s | 2.45× | 1.999 s | 0.780 s |
-| 110 | 5.064 s | 1.566 s | 3.23× | 4.909 s | 1.450 s |
-| 140 | 52.292 s | 1.840 s | **28.42×** | 52.132 s | 1.674 s |
+| 20 | 0.006 s | 0.006 s | 1.02× | 0.003 s | 0.003 s |
+| 30 | 0.086 s | 0.085 s | 1.02× | 0.050 s | 0.051 s |
+| 40 | 0.135 s | 0.137 s | 0.99× | 0.123 s | 0.124 s |
+| 60 | 0.169 s | 0.166 s | 1.02× | 0.128 s | 0.127 s |
+| 90 | 2.105 s | 0.860 s | 2.45× | 2.014 s | 0.787 s |
+| 110 | 5.169 s | 1.614 s | 3.20× | 5.008 s | 1.490 s |
+| 140 | 53.446 s | 1.855 s | **28.81×** | 53.283 s | 1.687 s |
 
 The last two columns show the whole difference is the factoring stage,
 which is the only thing the backend touches.
@@ -465,43 +468,61 @@ gate keeps it from being reached at all.
 `make bench-cuda`, over every prime of 90 digits or more in
 `bench/primes.txt`, at two seeds each:
 
-| Digits | Seed | CPU | CUDA | Speedup | | Digits | Seed | CPU | CUDA | Speedup |
-|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|
-| 90 | 1 | 1.19 s | 0.80 s | 1.48× | | 100 | 1 | 2.22 s | 1.67 s | 1.33× |
-| 90 | 5 | 1.41 s | 1.28 s | 1.11× | | 100 | 5 | 1.02 s | 1.76 s | 0.58× |
-| 90 | 1 | 2.36 s | 2.37 s | 0.99× | | 100 | 1 | 5.58 s | 0.66 s | 8.50× |
-| 90 | 5 | 1.72 s | 2.59 s | 0.67× | | 100 | 5 | 4.97 s | 0.68 s | 7.26× |
-| 90 | 1 | 11.40 s | 0.76 s | **15.01×** | | 110 | 1 | 5.00 s | 1.74 s | 2.88× |
-| 90 | 5 | 11.19 s | 0.80 s | **13.94×** | | 110 | 5 | 4.78 s | 1.68 s | 2.85× |
-| 90 | 1 | 2.04 s | 0.92 s | 2.21× | | 110 | 1 | 4.61 s | 1.30 s | 3.56× |
-| 90 | 5 | 2.81 s | 1.02 s | 2.75× | | 110 | 5 | 4.14 s | 1.44 s | 2.87× |
-| 100 | 1 | 18.58 s | 3.01 s | 6.18× | | 120 | 1 | 4.89 s | 3.90 s | 1.25× |
-| 100 | 5 | 17.84 s | 3.29 s | 5.43× | | 120 | 5 | 2.54 s | 4.22 s | 0.60× |
-| 100 | 1 | 0.65 s | 0.76 s | 0.85× | | 130 | 1 | 7.00 s | 4.79 s | 1.46× |
-| 100 | 5 | 1.08 s | 1.28 s | 0.84× | | 130 | 5 | 4.56 s | 6.12 s | 0.74× |
-| 100 | 1 | 3.76 s | 1.16 s | 3.24× | | 130 | 1 | 2.44 s | 5.12 s | 0.47× |
-| 100 | 5 | 3.48 s | 1.21 s | 2.88× | | 130 | 5 | 3.24 s | 4.86 s | 0.67× |
-| 140 | 1 | 51.49 s | 1.96 s | **26.25×** | | 150 | 1 | 25.52 s | 8.13 s | 3.14× |
-| 140 | 5 | 44.66 s | 2.25 s | **19.87×** | | 150 | 5 | 19.19 s | 7.59 s | 2.53× |
-| 140 | 1 | 4.58 s | 3.71 s | 1.24× | | 180 | 1 | 14.75 s | 15.70 s | 0.94× |
-| 140 | 5 | 10.72 s | 4.10 s | 2.61× | | 180 | 5 | 14.66 s | 16.44 s | 0.89× |
+| Digits | Seed | CPU | CUDA | Speedup |
+|---:|---:|---:|---:|---:|
+| 90 | 1 | 1.22 s | 0.83 s | 1.48× |
+| 90 | 5 | 1.44 s | 1.29 s | 1.12× |
+| 90 | 1 | 2.36 s | 2.36 s | 1.00× |
+| 90 | 5 | 1.78 s | 2.69 s | 0.66× |
+| 90 | 1 | 11.73 s | 0.77 s | 15.33× |
+| 90 | 5 | 11.42 s | 0.81 s | 14.11× |
+| 90 | 1 | 2.09 s | 0.92 s | 2.27× |
+| 90 | 5 | 2.91 s | 1.05 s | 2.77× |
+| 100 | 1 | 19.00 s | 3.04 s | 6.25× |
+| 100 | 5 | 18.30 s | 3.31 s | 5.53× |
+| 100 | 1 | 0.67 s | 0.76 s | 0.88× |
+| 100 | 5 | 1.07 s | 1.30 s | 0.83× |
+| 100 | 1 | 3.83 s | 1.17 s | 3.27× |
+| 100 | 5 | 3.54 s | 1.23 s | 2.87× |
+| 100 | 1 | 2.29 s | 1.71 s | 1.33× |
+| 100 | 5 | 1.04 s | 1.80 s | 0.57× |
+| 100 | 1 | 5.70 s | 0.67 s | 8.46× |
+| 100 | 5 | 5.13 s | 0.70 s | 7.30× |
+| 110 | 1 | 5.11 s | 1.74 s | 2.94× |
+| 110 | 5 | 4.90 s | 1.73 s | 2.83× |
+| 110 | 1 | 4.73 s | 1.34 s | 3.53× |
+| 110 | 5 | 4.22 s | 1.46 s | 2.89× |
+| 120 | 1 | 4.98 s | 4.04 s | 1.23× |
+| 120 | 5 | 2.57 s | 4.25 s | 0.61× |
+| 130 | 1 | 7.18 s | 4.89 s | 1.47× |
+| 130 | 5 | 4.69 s | 6.20 s | 0.76× |
+| 130 | 1 | 2.52 s | 5.23 s | 0.48× |
+| 130 | 5 | 3.36 s | 5.01 s | 0.67× |
+| 140 | 1 | 52.70 s | 1.97 s | 26.74× |
+| 140 | 5 | 45.76 s | 2.25 s | 20.35× |
+| 140 | 1 | 4.68 s | 3.76 s | 1.24× |
+| 140 | 5 | 10.90 s | 4.18 s | 2.61× |
+| 150 | 1 | 26.07 s | 8.27 s | 3.15× |
+| 150 | 5 | 19.60 s | 7.68 s | 2.55× |
+| 180 | 1 | 15.10 s | 16.07 s | 0.94× |
+| 180 | 5 | 15.11 s | 16.81 s | 0.90× |
 
 | | CPU | CUDA |
 |---|---:|---:|
-| Total | 322.1 s | **121.1 s** |
-| Fastest run | 0.65 s | 0.66 s |
-| Slowest run | **51.49 s** | **16.44 s** |
+| Total | 329.7 s | **123.3 s** |
+| Fastest run | 0.67 s | 0.67 s |
+| Slowest run | **52.70 s** | **16.81 s** |
 | Faster in | 11 of 36 | **25 of 36** |
 
-Aggregate **2.66×**, median **2.37×**, range 0.47× to 26.25×.
+Aggregate **2.67×**, median **2.41×**, range 0.48× to 26.74×.
 
 The aggregate understates the mechanism. The real effect is **variance
-reduction**: host times span almost two orders of magnitude, 0.65 s to
-51.5 s, while GPU-assisted times stay within a factor of 25, 0.66 s to
-16.4 s. The GPU does not make every proof faster so much as it removes
-the pathological ones, where the host's twenty curves per bound grind
-against a cofactor that thousands of curves split immediately. Nearly
-every run the backend loses is one where the host was already fast.
+reduction**: host times spread over almost two orders of magnitude, 0.67 s
+to 52.7 s, while GPU-assisted times stay within a factor of 25, 0.67 s to
+16.8 s. The GPU does not make every proof faster so much as it removes the
+pathological ones, where the host's twenty curves per bound grind against
+a cofactor that thousands of curves split immediately. Nearly every run
+the backend loses is one where the host was already fast.
 
 The 180-digit rows are the exception worth noting: there the backend
 loses slightly on both seeds. Reach is not unbounded, and past some size
@@ -514,13 +535,13 @@ curves, size gate disabled so the GPU is always tried:
 
 | Factor | CPU | CUDA |
 |---:|---|---|
-| 8 digits | found, 0.029 s | found, 0.028 s |
-| 10 digits | found, 0.037 s | found, 0.037 s |
-| 12 digits | found, 1.350 s | found, 1.351 s |
-| 14 digits | **not found**, 1.655 s | found, 3.441 s |
-| 16 digits | **not found**, 1.752 s | found, 3.486 s |
-| 18 digits | **not found**, 2.247 s | found, 3.993 s |
-| 20 digits | **not found**, 2.306 s | found, 4.046 s |
+| 8 digits | found, 0.029 s | found, 0.029 s |
+| 10 digits | found, 0.039 s | found, 0.038 s |
+| 12 digits | found, 1.395 s | found, 1.396 s |
+| 14 digits | **not found**, 1.657 s | found, 3.511 s |
+| 16 digits | **not found**, 1.802 s | found, 3.553 s |
+| 18 digits | **not found**, 2.315 s | found, 4.094 s |
+| 20 digits | **not found**, 2.431 s | found, 4.132 s |
 
 From roughly 14-digit factors upward the CPU implementation gives up
 where the GPU succeeds. (The CUDA column includes the failed CPU attempt
@@ -543,6 +564,162 @@ slower.
 The backend therefore runs the CPU attempt first and escalates to the GPU
 only when it fails *and* the cofactor is at least `cuda_min_bits` (192 by
 default) wide. Set it to 0 to try the GPU on every failed attempt.
+
+## Parallelism
+
+An ECPP downrun is inherently sequential — step *i*+1 proves the prime
+that step *i* produced — so there is no coarse-grained parallelism inside
+a single proof. What the algorithm does offer is two finer axes, and they
+suit different tools.
+
+| Site | Independent? | Share of runtime | Fan-out | Used |
+|---|---|---:|---|---|
+| ECM curves | fully; one success ends the search | 52–99.5% | unbounded | **POSIX threads** (`-T`) |
+| Discriminant sweep | until the first success | ~100% | up to `Dmax` | **POSIX threads** (`-S`) |
+| Whole numbers | fully | — | unbounded | **MPI** |
+| *m* candidates per *D* | fully | within ECM | 2–6 | not yet |
+| *j*(τ) per reduced form | fully, then a reduction | 0.1–85% | *h(D)* | not yet |
+| Root finding (`Recurse`) | two subtrees | <1% | 2 | not worth it |
+| The downrun itself | **no** — each step needs the last | — | 1 | — |
+
+### Threads: `-T N`
+
+ECM is where the time goes and its curves are independent trials, so the
+twenty attempts per bound become twenty parallel attempts. `-T 0` uses
+one thread per CPU. Each worker owns a `gmp_randstate_t`, which is the
+only GMP state the prover mutates rather than merely reads; everything
+else in the inner loop works on locals.
+
+Measured on 32 cores over all eighteen primes of 90 digits or more in
+`bench/primes.txt`, `make bench-threads`:
+
+| Threads | Total | Speedup |
+|---:|---:|---:|
+| 1 | 171.6 s | 1.00× |
+| 2 | 135.0 s | 1.27× |
+| 4 | 54.9 s | 3.12× |
+| 8 | 41.9 s | 4.09× |
+| 16 | 31.9 s | 5.38× |
+| 32 | 28.7 s | **5.98×** |
+
+Scaling is sublinear in aggregate and flattens past sixteen threads,
+but *individual* inputs frequently beat the thread count — one 90-digit
+prime goes 11.63 s to 2.52 s on two threads, and 52.63 s to 2.72 s on
+four. Both facts have the same cause: ECM is a Las Vegas algorithm, so
+concurrent curves finish in the time of the *luckiest* rather than the
+average. That produces enormous wins where the sequential search was
+unlucky and nothing at all where it was not, which averages out to the
+column above. Past roughly twenty curves per bound the extra trials are
+mostly speculative and stop paying, which is where the flattening comes
+from.
+
+An earlier version of this table, measured over only five primes,
+reported 6.96×. The eighteen-prime figure above is the honest one; a
+small sample of a high-variance quantity flatters whichever end it
+happens to catch.
+
+Unlike the CUDA backend this has no per-launch cost, so it is worth
+enabling at any size. Like the CUDA backend it changes *which* factor is
+found, so certificates differ from a single-threaded run while remaining
+valid — verify them rather than diffing them. `-T 1` reproduces the
+historical program byte for byte.
+
+### The discriminant sweep: `-S N`
+
+Each discriminant is an independent trial, and the work under one is
+essentially a whole proof step — the factoring stage and the class
+polynomial construction both sit beneath it. So this is speculative
+parallelism: run several *D* at once and keep the best.
+
+Two properties make it usable rather than merely fast.
+
+**It stays deterministic.** Each attempt seeds its own random stream from
+the discriminant, so `try_discriminant(D)` is a pure function of
+(*D*, *N*, seed). Output does not depend on scheduling: a run at 32
+threads is byte-identical to a run at 2.
+
+**The smallest *D* still wins.** Workers draw monotonically increasing
+indices; a success at index *k* stops new work beyond *k* while
+in-flight attempts below it finish. Taking the smallest success means the
+sweep picks the discriminant the sequential walk would have picked —
+which matters, because a larger |*D*| means a larger class number and a
+costlier proof step. Racing to "any success" would often choose a worse
+curve and give the speedup straight back.
+
+`make bench-sweep`, over the same eighteen primes as the thread table
+above so the two are directly comparable:
+
+| Threads | Total | Speedup |
+|---:|---:|---:|
+| 1 | 172.3 s | 1.00× |
+| 2 | 133.6 s | 1.29× |
+| 4 | 122.3 s | 1.41× |
+| 8 | 119.9 s | 1.44× |
+| 16 | 118.7 s | 1.45× |
+| 32 | 118.5 s | **1.45×** |
+
+**This is a much weaker result than threading ECM — 1.45× against 5.98×
+on identical inputs — and the reason is structural.** Most inputs succeed
+on one of the first few discriminants, so there is simply not much sweep
+to parallelise; and because the smallest success wins, everything the
+other workers computed is discarded. That discarding is deliberate, not
+waste to be optimised away: it is what buys the cheaper curve.
+
+The gain is concentrated and the losses are real. Where the sweep is long
+it pays well — 52.98 s to 23.68 s at 140 digits, 19.08 s to 10.14 s at
+100 — and one 100-digit case improves 2.29 s to 0.93 s. But several
+inputs get slightly *slower*, by a few percent to about twenty:
+1.21 → 1.41 s, 2.39 → 2.85 s, 5.11 → 5.78 s. Those are the ones whose
+first discriminant already worked, where the fan-out has nothing to find
+and only costs thread setup.
+
+It also plateaus at four threads, and nothing above that helps. If you
+have cores to spend, spend them on `-T`.
+
+An earlier version was far worse, turning 0.66 s into 2.29 s, because
+thread creation cost more than the sweep it was accelerating. The
+smallest few discriminants are now probed on the calling thread before
+any fan-out, which costs nothing in the parallel case and keeps `-S` from
+losing badly to `-S 1`.
+
+Prefer `-T` over `-S` when only one applies; setting both oversubscribes,
+since each sweep worker runs its own ECM, so `-S` wins and forces `-T 1`.
+
+### MPI: batch mode
+
+Whole numbers are embarrassingly parallel with no communication until the
+end, which is what MPI is for. `gmpecpp-mpi` distributes them, handing
+out work dynamically rather than partitioning it up front — proof times
+vary by two orders of magnitude between neighbouring inputs, so a static
+split would leave most ranks idle behind one straggler.
+
+```sh
+mpirun -n 10 ./gmpecpp-mpi -T 4 bench/primes.txt
+```
+
+Ten primes of 90–110 digits, wall clock:
+
+| Configuration | Wall | Speedup |
+|---|---:|---:|
+| 1 rank, 1 thread | 53.78 s | 1.00× |
+| 5 ranks, 1 thread | 20.47 s | 2.63× |
+| 9 ranks, 1 thread | 20.45 s | 2.63× |
+| 5 ranks, 4 threads | 5.68 s | 9.47× |
+| 9 ranks, 4 threads | 4.89 s | **11.00×** |
+
+**MPI alone plateaus at 2.63×, and adding ranks past five changes
+nothing.** The batch's wall time is bounded by its slowest single proof,
+and no number of ranks can split one proof. Threads *can*, because they
+work inside it — which is why the hybrid reaches 11× where either tool
+alone stalls. This is the case for combining them rather than picking
+one.
+
+### What is not parallelised, and why
+
+**Class polynomial construction** parallelises as a map over reduced
+forms followed by a reduction, and each *j*(τ) is expensive. It is worth
+doing at high `-p`, where that layer dominates; at the 1000-bit default
+it is 0.1–37% of runtime and ECM is the better target.
 
 ## Tests
 

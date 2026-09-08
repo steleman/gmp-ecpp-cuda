@@ -1,20 +1,19 @@
-/*
- * ecm_cuda.cu -- CUDA/CGBN backend for the ECM factoring stage.
- *
- * Lenstra's elliptic curve method is the one part of this prover that is
- * embarrassingly parallel: every curve is an independent trial, and only
- * one of them has to succeed.  That maps directly onto CGBN, which runs
- * many fixed-width big integer instances at once, each spread across TPI
- * cooperating threads.
- *
- * Stage 1 only.  Curves are Montgomery form B*y^2 = x^3 + A*x^2 + x with
- * Suyama's parametrisation, worked in XZ coordinates so the inner loop
- * needs no modular inversion -- the whole point, since an inversion per
- * step would dominate.  All arithmetic is in Montgomery representation.
- *
- * Copyright (c) 2005 Paul Zimmermann and contributors (the CPU ECM this
- * mirrors); GPL-3.0-or-later, as the rest of the program.
- */
+//
+// ecm_cuda.cu -- CUDA/CGBN backend for the ECM factoring stage.
+//
+// Lenstra's elliptic curve method is the one part of this prover that is
+// embarrassingly parallel: every curve is an independent trial, and only
+// one of them has to succeed.  That maps directly onto CGBN, which runs
+// many fixed-width big integer instances at once, each spread across TPI
+// cooperating threads.
+//
+// Stage 1 only.  Curves are Montgomery form B*y^2 = x^3 + A*x^2 + x with
+// Suyama's parametrisation, worked in XZ coordinates so the inner loop
+// needs no modular inversion -- the whole point, since an inversion per
+// step would dominate.  All arithmetic is in Montgomery representation.
+//
+// Copyright (c) 2005 Paul Zimmermann and contributors (the CPU ECM this
+// mirrors); GPL-3.0-or-later, as the rest of the program.
 
 #include <stdint.h>
 #include <stdio.h>
@@ -51,11 +50,11 @@ mod_sub(env_t env, typename env_t::cgbn_t &r, const typename env_t::cgbn_t &a,
     cgbn_add(env, r, r, n);
 }
 
-/* Montgomery curve doubling in XZ coordinates.
- *   a = X+Z, b = X-Z, c = a^2 - b^2
- *   X2 = a^2 * b^2
- *   Z2 = c * (b^2 + a24*c)
- * Output must not alias the input. */
+// Montgomery curve doubling in XZ coordinates.
+//   a = X+Z, b = X-Z, c = a^2 - b^2
+//   X2 = a^2 * b^2
+//   Z2 = c * (b^2 + a24*c)
+// Output must not alias the input.
 template <class env_t>
 __device__ __forceinline__ void
 xz_double(env_t env, typename env_t::cgbn_t &X2, typename env_t::cgbn_t &Z2,
@@ -74,10 +73,10 @@ xz_double(env_t env, typename env_t::cgbn_t &X2, typename env_t::cgbn_t &Z2,
   cgbn_mont_mul(env, Z2, c, t, n, np0);
 }
 
-/* Differential addition: given P1, P2 and their difference D = P1 - P2,
- *   X3 = Zd * ((X1-Z1)(X2+Z2) + (X1+Z1)(X2-Z2))^2
- *   Z3 = Xd * ((X1-Z1)(X2+Z2) - (X1+Z1)(X2-Z2))^2
- * Output must not alias the inputs. */
+// Differential addition: given P1, P2 and their difference D = P1 - P2,
+//   X3 = Zd * ((X1-Z1)(X2+Z2) + (X1+Z1)(X2-Z2))^2
+//   Z3 = Xd * ((X1-Z1)(X2+Z2) - (X1+Z1)(X2-Z2))^2
+// Output must not alias the inputs.
 template <class env_t>
 __device__ __forceinline__ void
 xz_add(env_t env, typename env_t::cgbn_t &X3, typename env_t::cgbn_t &Z3,
@@ -100,9 +99,9 @@ xz_add(env_t env, typename env_t::cgbn_t &X3, typename env_t::cgbn_t &Z3,
   cgbn_mont_mul(env, Z3, Xd, q, n, np0);
 }
 
-/* Montgomery ladder: (X,Z) <- [k](X,Z), k a small scalar.
- * Maintains R1 - R0 = P so the differential addition always has P as its
- * difference. */
+// Montgomery ladder: (X,Z) <- [k](X,Z), k a small scalar.
+// Maintains R1 - R0 = P so the differential addition always has P as its
+// difference.
 template <class env_t>
 __device__ void xz_mul_ui(env_t env, typename env_t::cgbn_t &X,
                           typename env_t::cgbn_t &Z,
@@ -377,13 +376,11 @@ const char *cuda_device_name() {
   return d.usable ? d.name : 0;
 }
 
-/*
- * Try to split n with `curves` concurrent ECM curves at bound b1.
- * Returns true and sets `factor` to a nontrivial divisor on success.
- *
- * The CGBN instance width is fixed at compile time, so pick the smallest
- * that comfortably holds n; a wider instance costs proportionally more.
- */
+// Try to split n with `curves` concurrent ECM curves at bound b1.
+// Returns true and sets `factor` to a nontrivial divisor on success.
+//
+// The CGBN instance width is fixed at compile time, so pick the smallest
+// that comfortably holds n; a wider instance costs proportionally more.
 bool cuda_ecm_factor(mpz_srcptr n, unsigned long b1, unsigned int curves,
                      unsigned long seed, mpz_ptr factor) {
   if (!device_info().usable || curves == 0)

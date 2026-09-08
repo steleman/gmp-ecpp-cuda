@@ -1,9 +1,6 @@
-/*
- * ecm_stub.cpp -- the ECM backend hooks for builds without CUDA.
- *
- * Linked in place of ecm_cuda.o when the library is built CPU-only, so
- * that gmpecpp_have_cuda() answers honestly rather than failing to link.
- */
+// ecm_stub.cpp -- the ECM backend hooks for builds without CUDA.
+// Linked in place of ecm_cuda.o when the library is built CPU-only, so
+// that gmpecpp_have_cuda() answers honestly rather than failing to link.
 
 #include <gmp.h>
 

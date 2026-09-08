@@ -1,9 +1,11 @@
 #!/bin/bash
+
 # cuda-sweep -- whole-proof CPU vs CUDA across sizes and seeds.
 #
 # Produces the "full sweep" table in README.md.  The spread matters more
 # than the mean: the backend's value is in removing the pathological
 # cases, so watch the slowest run in each column rather than the average.
+
 set -u
 BIN=${BIN:-./gmp-ecpp}
 DATA=${DATA:-bench/primes.txt}
