@@ -1,0 +1,504 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{url}
+\usepackage[margin=1in]{geometry}
+\usepackage[hidelinks]{hyperref}
+
+\lstset{basicstyle=\ttfamily\small,columns=fullflexible,breaklines=true}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\us}{\,$\mu$s}
+
+% Paragraphs dense with \code names would otherwise overrun the margin.
+\setlength{\emergencystretch}{3em}
+
+\title{GMP on the CPU or CGBN on the GPU?\\[4pt]
+  \large Measurements from gmp-ecpp}
+
+\author{Stefan Teleman \code{<stefan.teleman@gmail.com>}\\[4pt]Claude Opus 5.5 (Anthropic)}
+
+\date{November 17, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This report asks whether the multiple-precision arithmetic that gmp-ecpp
+does on the host with GMP should move to the GPU with CGBN, in its ECPP
+prover (\code{libgmpecpp}, \code{gmpecpp-mpi}) and in its ECM factorizer
+(\code{libgmpecmfft}, \code{gmpecmfft-mpi}). Three experiments answer it:
+the latency and throughput of a single operation, where each program's
+host time actually goes, and end-to-end batch proving over MPI with and
+without the CGBN backend, across several layouts and seeds. Replacing GMP
+calls one for one with CGBN is $4$ to $172\times$ slower; batched, CGBN is
+$12$ to $124\times$ faster, and the work that batches has already moved.
+End to end, the CGBN backend's benefit falls as the host gets threads,
+from $1.83\times$ to about parity, while it consistently removes
+pathological proofs. A default of Open MPI's process binding can fake a
+$3.6\times$ advantage. Every number comes from a committed harness
+(\code{make bench-cgbn-latency}, \code{bench-gmp-profile},
+\code{bench-mpi-cgbn}).
+\end{abstract}
+
+\tableofcontents
+
+\section{Summary}
+
+\begin{itemize}
+  \item \textbf{One-for-one replacement of GMP calls with CGBN is slower,
+    by $4\times$ to $172\times$.} A single CGBN instance runs on 8--32
+    threads of one SM. Every call pays a fixed round trip of about
+    26\us: copies in, a launch, a synchronization, a copy out. GMP
+    finishes a 512-bit modular multiplication in 0.15\us.
+  \item \textbf{Batched, CGBN is $12\times$ to $124\times$ faster than
+    GMP.} That takes thousands of independent operations of one width in
+    a single launch.
+  \item \textbf{The batchable host work has already moved; the rest
+    cannot.}
+    \begin{itemize}
+      \item In the factorizer, host GMP is at most 0.06\% of host time,
+        and above 16352 bits CGBN cannot hold the numbers at all.
+      \item In the prover, the batchable part is the elliptic curve method
+        (ECM), and \code{-C} already runs it on CGBN. What GMP still does
+        is mostly affine point arithmetic (gcd-bound), in work that is
+        small and sequential: the host's deliberate first attempt at each
+        factorization, and the downrun's point checks.
+        Experiment~1 (\S\ref{sec:exp1}) rules out one-call-at-a-time
+        offload of either.
+    \end{itemize}
+  \item \textbf{End to end, the CGBN backend's benefit depends on the
+    host's thread budget.}
+    \begin{itemize}
+      \item It is $1.83\times$ with one worker of 8 ECM threads,
+        $1.37\times$ with 16, and $1.20\times$ with 32.
+      \item With 4 or 8 workers sharing one GPU it is roughly even
+        ($0.98\times$, $1.16\times$).
+      \item In every configuration it cuts variance: one worker's
+        18-proof batch ranged from 39 to 57\,s on the host and from 24
+        to 28\,s with CGBN.
+    \end{itemize}
+  \item \textbf{Process binding can fake the result.} \code{mpirun -n 2}
+    binds the worker to one core by default. All its ECM threads then
+    share that core, the host path slows $4\times$, and a spurious
+    $3.6\times$ ``GPU advantage'' appears (\S\ref{sec:binding}).
+\end{itemize}
+
+\section{System under test}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+CPU & Intel Core i9-13900K: 8 P-cores $\times$ 2 threads (CPUs 0--15) \\
+    & + 16 E-cores (CPUs 16--31), up to 5.8\,GHz \\
+GPU & NVIDIA RTX PRO 4500 Blackwell (sm\_120), 32\,GB, driver 595.71.05 \\
+CUDA & 13.2; CGBN (NVlabs) \\
+GMP & 6.3.0 (Fedora 41) \\
+MPI & Open MPI 5.0.5, rebuilt CUDA-aware (irrelevant here: \\
+    & all messages are small host messages) \\
+OS & Fedora 41, Linux 6.17.10 \\
+Compilers & GCC 14 (host); \code{nvcc -O3 -arch=sm\_120} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Background: what runs where}
+
+\paragraph{CGBN} is NVlabs' fixed-width multiple-precision library. An
+instance of \code{BITS} bits is spread over \code{TPI} threads (8, 16 or
+32; cooperative groups, warp-synchronous), each holding $\code{BITS}/(32
+\cdot \code{TPI})$ 32-bit limbs. Arithmetic is done cooperatively across
+those threads; modular multiplication is Montgomery's. Throughput comes
+only from running many independent instances per launch. In this project
+the widest instance is 16384 bits, because at $\code{TPI} = 32$ the
+kernels already use 236--248 of 255 registers.
+
+\paragraph{The prover} (Atkin--Morain ECPP) is mostly host GMP: \code{mpz}
+for the number theory, \code{mpf} for the class polynomials, polynomial
+root finding mod $p$, and the elliptic curve method, which it uses to
+factor candidate curve orders. Its host ECM (\code{LenstrasECM}) works in
+affine Weierstrass coordinates, so every point addition needs a modular
+inverse, that is, an extended gcd. With \code{-T N} it runs $N$ threads
+(\code{LenstrasECM\_mt}):
+\begin{itemize}
+  \item each thread takes curves $\mathit{id}, \mathit{id}+N, \ldots$
+    from $\max(N, 20)$ curves per bound, and runs its own sequence of
+    bounds without a barrier;
+  \item the first thread to find a factor sets an atomic flag, and the
+    others stop.
+\end{itemize}
+With \code{-C}, the prover keeps the host attempt first and escalates to
+the GPU only when the cofactor is at least 192 bits. The GPU then runs 4096
+Montgomery-curve instances (no inversions) at once, stage one and stage
+two, with $B_1$ clamped to $[10^3, 10^5]$. An earlier version escalated
+every failed host attempt and made proofs $2\times$ slower: most calls are
+meant to fail fast, because they are rejecting candidate curve orders.
+
+\paragraph{The factorizer} runs ECM entirely on the GPU, on CGBN up to
+16352 bits and on cuFFT arithmetic above. The host does curve setup, moves
+a few values between engines, and takes one gcd per curve at the end.
+
+\paragraph{\code{gmpecpp-mpi}} distributes whole numbers: rank 0 hands out
+indices on request, and each worker calls \code{gmpecpp\_prove()}. Every
+proof reseeds the prover's generator from the configured seed, so the
+order in which ranks take numbers does not affect any proof; \code{-s}
+sets that seed.
+
+\section{Experiment 1: one operation, one instance, or 4096}
+\label{sec:exp1}
+
+\paragraph{Method} (\code{bench/cgbn-latency.cu}). For 512, 1024 and 2048
+bits (CGBN \code{TPI} = 8, 16, 32): modular exponentiation $a^e \bmod n$
+with a full-width exponent, the core of Rabin--Miller and of square roots
+mod $p$, and modular multiplication $ab \bmod n$ (\code{cgbn\_mul\_wide}
++ \code{cgbn\_rem\_wide}).
+\begin{itemize}
+  \item \textbf{GMP:} one thread, \code{mpz\_powm}, and \code{mpz\_mul} +
+    \code{mpz\_mod}.
+  \item \textbf{CGBN, one:} a full round trip for one instance: three
+    \code{cudaMemcpy} host to device, a \code{<<<1, TPI>>>} launch, and a
+    \code{cudaMemcpy} device to host, which synchronizes. This is the cost
+    of replacing one GMP call.
+  \item \textbf{CGBN, batch:} 4096 instances in one launch (128 threads
+    per block), plus the result copy, divided by 4096. Contexts use
+    \code{cgbn\_no\_checks}.
+  \item One result per width was compared with GMP; all matched.
+\end{itemize}
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{lrrr}
+\toprule
+Operation & GMP & CGBN, one instance & CGBN, 4096 per launch \\
+\midrule
+$a^e \bmod n$, 512 bits  & 49\us   & 1439\us{} ($29\times$ slower) & 0.83\us/op ($59\times$ faster) \\
+$a^e \bmod n$, 1024 bits & 321\us  & 4774\us{} ($15\times$ slower) & 3.14\us/op ($102\times$ faster) \\
+$a^e \bmod n$, 2048 bits & 2157\us & 9210\us{} ($4.3\times$ slower) & 17.4\us/op ($124\times$ faster) \\
+$ab \bmod n$, 512 bits   & 0.15\us & 26.2\us{} ($172\times$ slower) & 0.013\us/op ($12\times$ faster) \\
+$ab \bmod n$, 1024 bits  & 0.43\us & 26.2\us{} ($61\times$ slower) & 0.019\us/op ($22\times$ faster) \\
+$ab \bmod n$, 2048 bits  & 1.42\us & 26.3\us{} ($19\times$ slower) & 0.036\us/op ($40\times$ faster) \\
+\bottomrule
+\end{tabular}
+\caption{One GMP operation against one CGBN instance and against 4096.}
+\label{tab:lat}
+\end{table}
+
+\paragraph{Reading it.}
+\begin{itemize}
+  \item \textbf{The fixed cost.} The multiplication rows are flat at about
+    26\us{} for one instance at every width. That is the round trip
+    (pageable \code{cudaMemcpy}, launch, synchronization), not the
+    arithmetic. Any design that hands single operations to the GPU pays it
+    every time; GMP's 512-bit multiplication is 170 times shorter.
+  \item \textbf{The parallelism.} A single exponentiation leaves the GPU
+    almost idle: one instance is one warp, or a quarter of one, on one SM
+    of many, executing a serial square-and-multiply chain. Against it is
+    one host core at up to 5.8\,GHz running GMP's hand-tuned x86-64
+    assembly. The gap narrows with width ($29\times$ at 512 bits,
+    $4.3\times$ at 2048) because more threads per instance share the work.
+    It does not close.
+  \item \textbf{The batch.} With 4096 instances per launch the device is
+    full and the per-operation cost collapses. The advantage grows with
+    width for exponentiation ($59 \to 124\times$), where more arithmetic
+    sits behind each byte copied.
+  \item \textbf{Not measured:} launch-latency tuning (CUDA graphs, pinned
+    memory, persistent kernels) would shave part of the 26\us. No such
+    technique removes the gap between one warp and the whole GPU.
+\end{itemize}
+CGBN is worth using only where an algorithm exposes thousands of
+independent same-width operations at once. ECM curves do, and so would,
+for example, primality tests of many candidates at once. A sequential
+chain does not: a downrun step, a gcd, or Cornacchia on one discriminant.
+
+\section{Experiment 2: where the host time goes}
+\label{sec:exp2}
+
+\paragraph{Method} (\code{bench/gmp-profile.sh}). \code{perf record -e
+cpu-clock -F 1999} on each run, then \code{perf report -{}-sort dso}; for
+the prover also \code{-{}-sort dso,sym}, with \code{libgmp}'s symbols grouped
+into gcd and division (\code{*gcd*}, \code{*hgcd*}, \code{div2},
+\code{*divrem*}, \code{*div\_qr*}, \code{*bdiv*}, \code{*invert*}),
+\code{mpf\_*}, and the rest. The \code{libgmp} share bounds what any GPU
+offload of GMP could save. A thread blocked in a CUDA synchronization
+spins inside \code{libcuda}, so that share is time spent waiting on the
+GPU.
+
+On this hybrid CPU the default \code{cycles} event is two PMU events,
+\code{cpu\_core/cycles/} and \code{cpu\_atom/cycles/}. \code{perf report}
+prints one table per event, and a thread that migrates between core types
+is split across both. \code{cpu-clock} is a software timer: it counts
+time, uniformly, in one table.
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{lrrrrr}
+\toprule
+Run & Wall & \code{libgmp} & gcd, division & \code{mpf\_*} & \code{libcuda} \\
+\midrule
+Prover, 140 digits, host only, 1 thread & 67.6\,s & 92.2\% & 76.0\% & 0.0\% & --- \\
+Prover, same, \code{-C}                 & 2.9\,s  & 64.8\% & 52.0\% & 0.1\% & 23.6\% \\
+\code{gmpecmfft}, 2000 bits (CGBN)      &         & 0.04\% &        &       & 90\% \\
+\code{gmpecmfft}, 20000 bits (cuFFT)    &         & 0.06\% &        &       & 89\% \\
+\bottomrule
+\end{tabular}
+\caption{Share of host time by library (\code{perf}, \code{cpu-clock} at
+  1999\,Hz). The prover runs seed 1; \code{gmpecmfft} runs 2952 and 64
+  curves, $B_1 = 10^4$, $B_2 = 10^6$.}
+\label{tab:prof}
+\end{table}
+
+\paragraph{Reading it.}
+\begin{itemize}
+  \item \textbf{The factorizer} is essentially pure GPU. Its host GMP is at
+    most 0.06\% of host time, and the host thread spends about 90\% waiting
+    on the device (most of the rest is \code{[vdso]}, the polling loop's
+    clock reads). No GMP replacement can show up here; above 16352 bits
+    there is nothing CGBN could do anyway.
+  \item \textbf{The prover, host only,} is dominated by gcd and division:
+    \code{\_\_gmpn\_hgcd2} about 39\% and \code{div2} about 22\% of
+    samples. The prover's point arithmetic (\code{multiply}) is affine, with
+    an inversion at every point addition, and it serves the host ECM and
+    the downrun's point checks alike. The ECM share is precisely what
+    \code{-C} replaces: CGBN does it with Montgomery's x-only curves, which
+    need no inversion, across 4096 curves at once. Hence $67.6 \to 2.9$\,s,
+    $23\times$, on this proof. A frame-pointer call graph cannot divide
+    \code{multiply}'s time between its two callers: GMP's assembly keeps no
+    frame pointer, so unwinding stops early.
+  \item \textbf{The prover, \code{-C}:} 65\% of the time remains in GMP,
+    still mostly gcd and division (52\%); \code{mpf} is 0.1\% at the
+    default precision, and the \code{libcuda} 24\% is the host waiting on
+    the GPU's ECM. The affine arithmetic that remains belongs to small,
+    sequential work: the host's first attempt at every factorization, kept
+    on the host because most attempts are meant to fail quickly
+    (escalating all of them made proofs $2\times$ slower), and the
+    downrun's point checks, a short chain per step. Neither offers
+    thousands of independent same-width operations. Batching the host
+    attempts into a small GPU ECM is conceivable but untested, and it would
+    have to beat a fixed per-launch cost that most of these attempts,
+    failing in milliseconds, cannot amortize.
+\end{itemize}
+
+\section{Experiment 3: batch proofs over MPI}
+\label{sec:exp3}
+
+\paragraph{Method} (\code{bench/mpi-cgbn.sh}, \code{make bench-mpi-cgbn}).
+The 18 primes of 90--180 digits in \code{bench/primes.txt} ($4 \times 90$,
+$5 \times 100$, $2 \times 110$, $1 \times 120$, $2 \times 130$, $2 \times
+140$, $1 \times 150$, $1 \times 180$). Layouts of workers $\times$ ECM
+threads $1 \times 8$, $4 \times 8$ and $8 \times 4$ for seeds 1--5, each
+host-only and with \code{-C}, plus $1 \times 16$ and $1 \times 32$ for seed
+1. Rank 0 coordinates; all ranks are unbound (\code{mpirun -{}-oversubscribe
+-{}-bind-to none}), and every \code{-C} rank shares the one GPU. Host-only
+and \code{-C} runs alternate, so slow drift affects both alike. Every run
+proved all 18 numbers.
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{lrrrr}
+\toprule
+Workers $\times$ threads & Seeds & Host only & \code{-C} (CGBN) & Ratio \\
+\midrule
+$1 \times 8$  & 5 & 47.5\,s (39.3--57.3) & 25.9\,s (23.7--27.7) & $1.83\times$ \\
+$1 \times 16$ & 1 & 33.1\,s & 24.2\,s & $1.37\times$ \\
+$1 \times 32$ & 1 & 27.6\,s & 23.1\,s & $1.20\times$ \\
+$4 \times 8$  & 5 & 17.0\,s (13.4--19.8) & 17.4\,s (15.7--18.6) & $0.98\times$ \\
+$8 \times 4$  & 5 & 21.5\,s (20.1--24.9) & 18.5\,s (17.0--19.5) & $1.16\times$ \\
+\midrule
+$1 \times 8$, bound$^{*}$ & 1 & 185.3\,s & 51.7\,s & $3.59\times^{*}$ \\
+\bottomrule
+\end{tabular}
+\caption{Batch wall time, mean (minimum--maximum) over the seeds.
+  $^{*}$The worker bound to one core, Open MPI's default for two processes:
+  an artifact (\S\ref{sec:binding}).}
+\label{tab:mpi}
+\end{table}
+
+With several workers, the summed proof time is 52.7\,s host-only against
+46.3\,s with CGBN at $4 \times 8$ ($1.14\times$), and 79.2\,s against
+79.0\,s at $8 \times 4$ ($1.00\times$).
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{rrrrr}
+\toprule
+\# & Digits & Host only & \code{-C} (CGBN) & Host/CGBN \\
+\midrule
+0  & 90  & 0.47 (0.38--0.50)   & 0.51 (0.49--0.57) & $0.92\times$ \\
+1  & 90  & 0.69 (0.65--0.85)   & 1.46 (1.40--1.58) & $0.47\times$ \\
+2  & 90  & 2.79 (2.68--2.97)   & 0.37 (0.36--0.38) & $7.54\times$ \\
+3  & 90  & 0.64 (0.55--0.86)   & 0.38 (0.36--0.40) & $1.68\times$ \\
+4  & 100 & 4.32 (4.19--4.49)   & 1.59 (0.60--1.94) & $2.72\times$ \\
+5  & 100 & 0.25 (0.23--0.31)   & 0.45 (0.41--0.51) & $0.56\times$ \\
+6  & 100 & 1.09 (0.50--5.80)   & 0.46 (0.29--0.50) & $2.37\times$ \\
+7  & 100 & 0.36 (0.34--0.74)   & 0.70 (0.60--0.75) & $0.51\times$ \\
+8  & 100 & 1.41 (1.13--1.60)   & 0.34 (0.29--0.45) & $4.15\times$ \\
+9  & 110 & 1.44 (1.39--1.51)   & 0.93 (0.75--1.00) & $1.55\times$ \\
+10 & 110 & 1.04 (0.89--1.31)   & 0.55 (0.44--0.71) & $1.89\times$ \\
+11 & 120 & 1.09 (0.82--1.52)   & 1.37 (1.29--1.50) & $0.80\times$ \\
+12 & 130 & 1.41 (1.33--5.56)   & 2.89 (1.49--2.93) & $0.49\times$ \\
+13 & 130 & 1.19 (1.17--1.23)   & 2.55 (0.95--2.74) & $0.47\times$ \\
+14 & 140 & 10.60 (7.56--13.12) & 1.38 (1.09--1.44) & $7.68\times$ \\
+15 & 140 & 2.75 (1.46--5.86)   & 1.05 (0.97--1.16) & $2.62\times$ \\
+16 & 150 & 7.46 (5.03--7.76)   & 1.43 (1.36--1.48) & $5.22\times$ \\
+17 & 180 & 6.09 (3.42--9.26)   & 8.50 (7.12--9.33) & $0.72\times$ \\
+\midrule
+   &     & 45.1 (sum of medians) & 26.9           & $1.68\times$ \\
+\bottomrule
+\end{tabular}
+\caption{Per proof, $1 \times 8$: median (minimum--maximum) over 5 seeds,
+  seconds.}
+\label{tab:per}
+\end{table}
+
+\subsection{What it shows}
+
+\paragraph{The GPU's value falls as the host's thread budget rises:}
+$1.83\times$, $1.37\times$ and $1.20\times$ with 8, 16 and 32 ECM threads
+on one worker. The prover escalates to the GPU only when the host attempt
+fails on a cofactor of 192 bits or more. With more threads, the host
+attempt, which ends at the first factor any thread finds, succeeds more
+often and sooner. The CGBN side barely moves ($25.9 \to 24.2 \to
+23.1$\,s), because its time is dominated by work the extra host threads do
+not touch.
+
+\paragraph{Several ranks on one GPU dilute it to nothing in wall time:}
+$0.98\times$ at $4 \times 8$ and $1.16\times$ at $8 \times 4$. The ranks
+contend for one device, and each pays its own CUDA context creation and
+module loading. Proof \#1 (90 digits) with \code{-C} takes 1.40--1.58\,s on
+one worker, 3.23--3.58\,s with four and 6.46--7.17\,s with eight, across all
+five seeds.
+
+\paragraph{It works on the tail.} CGBN wins the hard proofs, those where
+the host would grind on a stubborn cofactor: \#2 $7.5\times$, \#14
+$7.7\times$, \#16 $5.2\times$, \#8 $4.2\times$. It loses the easy ones, 8 of
+18, by $0.47$--$0.92\times$: each escalation pays fixed GPU costs
+(launches, a 4096-curve wave, transfers) that the host would not have. The
+result is variance reduction: across seeds the host-only batch ranged
+39.3--57.3\,s, the CGBN batch 23.7--27.7\,s; per proof, \#6 ranged
+0.50--5.80\,s on the host and 0.29--0.50\,s with CGBN. This is also what the
+project's earlier single-thread sweep showed (\code{make bench-cuda}, 36
+proofs, one ECM thread: $420.6 \to 120.8$\,s, $3.48\times$), in the
+configuration most favourable to the GPU.
+
+\subsection{Determinism, and why runs vary}
+
+\code{gmpecpp\_prove()} reseeds its generator from the configured seed on
+entry, so a proof does not depend on which rank takes it or in what order;
+a seed fixes each proof's random choices (discriminant probing, points,
+curves). With \code{-T > 1}, though, the host ECM is a race. Each thread
+draws curves from its own deterministic stream, seeded from the proof seed
+and the thread id, and the first thread to find a factor wins, under a
+mutex and an atomic flag (\code{std::atomic<int> found}). Which factor wins
+depends on thread timing, and a different factor of a candidate order
+changes which candidates are accepted, and so the whole downrun. Under
+contention, from several workers or anything else competing for cores, the
+races can resolve differently from run to run; the seed ranges in
+Table~\ref{tab:mpi} therefore include timing-induced variation as well as
+the seeds' own. The certificates remain valid either way:
+\code{gmpecpp-verify} checks them, where byte comparison cannot.
+
+\subsection{The binding trap}
+\label{sec:binding}
+
+Open MPI binds processes to cores by default for small jobs. With two
+processes (coordinator plus one worker):
+\begin{lstlisting}
+$ mpirun --report-bindings -n 2 ./gmpecpp-mpi -T 8 primes.txt
+... Rank 0 bound to package[0][core:0]
+... Rank 1 bound to package[0][core:1]
+$ mpirun --oversubscribe --report-bindings -n 2 ./gmpecpp-mpi -T 8 primes.txt
+... Rank 0 is not bound (or bound to all available processors)
+... Rank 1 is not bound (or bound to all available processors)
+\end{lstlisting}
+The worker's threads inherit its CPU affinity: with \code{-T 8}, all eight
+ECM threads time-share core 1's two hardware threads.
+
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+$1 \times 8$, seed 1 & Host only & \code{-C} (CGBN) & Apparent ratio \\
+\midrule
+Unbound           & 45.1\,s  & 26.0\,s & $1.73\times$ \\
+Bound to one core & 185.3\,s & 51.7\,s & $3.59\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The host path, nearly all threaded ECM, slows $4.1\times$; the CGBN path,
+which needs little host CPU, slows $2\times$. The comparison then reports a
+$3.6\times$ GPU advantage that is mostly lost host parallelism. The trap is
+easy to fall into, because \code{-{}-oversubscribe} disables binding as a
+side effect, so multi-rank jobs launched with it look fine. The harness
+passes \code{-{}-bind-to none} explicitly. For multi-threaded MPI ranks
+generally, check \code{-{}-report-bindings} (or \code{taskset -p} on a
+worker) before trusting any thread-scaling number.
+
+\section{Recommendations}
+
+\begin{itemize}
+  \item \textbf{Do not port scalar GMP code to CGBN.} Experiment 1 bounds it
+    at $4\times$ to $172\times$ slower per operation.
+  \item \textbf{Port only batched, same-width integer work.} ECM already is.
+    Further candidates would have to be restructured into batches first
+    (for example, testing many candidate orders or discriminants at once),
+    and even then Amdahl's law applies to what remains.
+  \item \textbf{For batch proving on one GPU,} prefer few workers with many
+    unbound ECM threads each, and \code{-C}: CGBN then removes the
+    pathological proofs. With many ranks, give each GPU one rank
+    (\code{gmpecpp-mpi} across nodes with one GPU each is the natural
+    layout).
+  \item \textbf{The factorizer gains nothing} from moving its remaining host
+    GMP (at most 0.06\%).
+\end{itemize}
+
+\section{What was wrong along the way}
+
+Five intermediate results in this investigation were wrong. Each was caught
+by measuring again with a controlled setup, rather than by reasoning about
+the first numbers.
+\begin{enumerate}
+  \item \textbf{``CGBN is 3.6--4$\times$ faster with one worker.''} The
+    first single-worker runs used \code{mpirun -n 2} without
+    \code{-{}-oversubscribe}, so the worker was bound to one core
+    (\S\ref{sec:binding}).
+  \item \textbf{``\code{-T 32} is slower than \code{-T 8} because of
+    E-cores and \code{curves\_per\_bound}.''} The explanation was plausible
+    --- $\max(T, 20)$ curves per bound adds work above 20 threads, and
+    threads beyond 8 land on SMT siblings and E-cores --- but its premise
+    was the binding artifact. Unbound, 32 threads beat 8 (27.6\,s against
+    45.1\,s).
+  \item \textbf{``Multi-rank runs differ because the numbers reach ranks in
+    a different order and the random state carries over.''} The prover
+    reseeds at every proof. The real source is the threaded ECM race under
+    contention.
+  \item \textbf{``With \code{-C}, the GMP that remains is the class
+    polynomials' \code{mpf}.''} This came from misreading an exploratory
+    \code{perf} report. With \code{cpu-clock} and the symbols grouped,
+    \code{mpf} is 0.1\%, and gcd and division from the affine point
+    arithmetic is 52\%.
+  \item \textbf{Profile shares that added up to more than 100\%.} On the
+    hybrid CPU, \code{perf}'s default \code{cycles} event produced two report
+    tables (P-core and E-core PMUs), and the first grouping summed across
+    both. \code{cpu-clock} fixed it.
+\end{enumerate}
+
+\section{Reproducing}
+
+\begin{lstlisting}
+make                       # libraries, gmpecpp-mpi (needs Open MPI), gmpecmfft
+make bench-cgbn-latency    # experiment 1, ~1 min
+make bench-gmp-profile     # experiment 2, ~2 min; needs perf
+make bench-mpi-cgbn        # experiment 3, ~40 min; build/bench-mpi-cgbn/
+bash bench/mpi-cgbn.sh DIR "1 2 3" bound   # parts and seeds can be chosen
+\end{lstlisting}
+\code{bench-mpi-cgbn} writes each run's raw output to
+\path{build/bench-mpi-cgbn/<layout>-<cpu|gpu>-s<seed>.txt} and the
+tables to \code{summary.txt}. Numbers will differ on other hardware; the ratios
+and the binding effect are what to compare.
+
+\end{document}

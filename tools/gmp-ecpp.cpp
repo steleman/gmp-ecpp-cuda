@@ -20,32 +20,23 @@ static const char *program_name;
 
 static void print_usage(FILE *stream, int exit_code) {
   fprintf(stream, "Usage: %s options [ < inputfile ]\n", program_name);
-  fprintf(
-      stream,
-      "	-h	--help			Display this usage information.\n"
-      "	-Q	--Quiet			Print very reduced messages.\n"
-      "	-q	--quiet			Print reduced messages.\n"
-      "	-v	--verbose		Print verbose messages (including "
-      "progress marker).\n"
-      "	-o	--one			Run just one iteration before "
-      "termination.\n"
-      "	-H	--Hilbert		Use Hilbert polynomials (only).\n"
-      "	-W	--Weber			Use Weber polynomials (only).\n"
-      "	-s	--seed			Set (pseudo-)random seed.\n"
-      "	-p	--precision		Set GMP FP precision (default 1000).\n"
-      "	-e	--error_shift	Set precision in CP generation (default "
-      "1000).\n"
-      "	-B	--Bmax			Set max ECM factoring bound (default "
-      "2000 autoincrement).\n"
-      "	-D	--Dmax			Set max discriminant bound (default 20 "
-      "autoincrement).\n"
-      "	-C	--cuda			Use the CUDA/CGBN backend for ECM "
-      "factoring.\n"
-      "	-T	--threads		ECM worker threads (0 = one per CPU).\n"
-      "	-S	--sweep			Discriminant sweep threads (0 = one "
-      "per CPU).\n"
-      "	-c	--curves		Concurrent ECM curves for the CUDA "
-      "backend.\n");
+  fprintf(stream,
+          "	-h	--help			Display this usage information.\n"
+          "	-Q	--Quiet			Print very reduced messages.\n"
+          "	-q	--quiet			Print reduced messages.\n"
+          "	-v	--verbose		Print verbose messages (including progress marker).\n"
+          "	-o	--one			Run just one iteration before termination.\n"
+          "	-H	--Hilbert		Use Hilbert polynomials (only).\n"
+          "	-W	--Weber			Use Weber polynomials (only).\n"
+          "	-s	--seed			Set (pseudo-)random seed.\n"
+          "	-p	--precision		Set GMP FP precision (default 1000).\n"
+          "	-e	--error_shift	Set precision in CP generation (default 1000).\n"
+          "	-B	--Bmax			Set max ECM factoring bound (default 2000 autoincrement).\n"
+          "	-D	--Dmax			Set max discriminant bound (default 20 autoincrement).\n"
+          "	-C	--cuda			Use the CUDA/CGBN backend for ECM factoring.\n"
+          "	-T	--threads		ECM worker threads (0 = one per CPU).\n"
+          "	-S	--sweep			Discriminant sweep threads (0 = one per CPU).\n"
+          "	-c	--curves		Concurrent ECM curves for the CUDA backend.\n");
   exit(exit_code);
 }
 
@@ -65,14 +56,14 @@ int main(int argc, char *argv[]) {
 
   const char *const short_options = "hQqvoHWs:p:e:B:D:Cc:T:S:";
   const struct option long_options[] = {
-      {"help", 0, NULL, 'h'},      {"Quiet", 0, NULL, 'Q'},
-      {"quiet", 0, NULL, 'q'},     {"verbose", 0, NULL, 'v'},
-      {"one", 0, NULL, 'o'},       {"Hilbert", 0, NULL, 'H'},
-      {"Weber", 0, NULL, 'W'},     {"seed", 1, NULL, 's'},
-      {"precision", 1, NULL, 'p'}, {"error_shift", 1, NULL, 'e'},
-      {"Bmax", 1, NULL, 'B'},      {"Dmax", 1, NULL, 'D'},
-      {"cuda", 0, NULL, 'C'},      {"curves", 1, NULL, 'c'},
-      {"threads", 1, NULL, 'T'},   {"sweep", 1, NULL, 'S'},
+      {"help", 0, NULL, 'h'},        {"Quiet", 0, NULL, 'Q'},
+      {"quiet", 0, NULL, 'q'},       {"verbose", 0, NULL, 'v'},
+      {"one", 0, NULL, 'o'},         {"Hilbert", 0, NULL, 'H'},
+      {"Weber", 0, NULL, 'W'},       {"seed", 1, NULL, 's'},
+      {"precision", 1, NULL, 'p'},   {"error_shift", 1, NULL, 'e'},
+      {"Bmax", 1, NULL, 'B'},        {"Dmax", 1, NULL, 'D'},
+      {"cuda", 0, NULL, 'C'},        {"curves", 1, NULL, 'c'},
+      {"threads", 1, NULL, 'T'}, {"sweep", 1, NULL, 'S'},
       {NULL, 0, NULL, 0}};
 
   program_name = argv[0];
@@ -86,68 +77,31 @@ int main(int argc, char *argv[]) {
   do {
     next_option = getopt_long(argc, argv, short_options, long_options, NULL);
     switch (next_option) {
-    case 'h':
-      print_usage(stdout, 0);
-      break;
-    case 'Q':
-      Quiet = 1;
-      break;
-    case 'q':
-      quiet = 1;
-      break;
-    case 'v':
-      verbose = 1;
-      break;
-    case 'o':
-      gmpecpp_config_set_one_step(cfg, 1);
-      break;
-    case 'H':
-      gmpecpp_config_set_hilbert(cfg, 1);
-      break;
-    case 'W':
-      gmpecpp_config_set_weber(cfg, 1);
-      break;
-    case 's':
-      gmpecpp_config_set_seed(cfg, strtoul(optarg, NULL, 10));
-      break;
-    case 'p':
-      gmpecpp_config_set_precision(cfg, strtoul(optarg, NULL, 10));
-      break;
-    case 'e':
-      gmpecpp_config_set_error_shift(cfg, strtoul(optarg, NULL, 10));
-      break;
-    case 'B':
-      gmpecpp_config_set_bmax(cfg, strtoul(optarg, NULL, 10));
-      break;
-    case 'D':
-      gmpecpp_config_set_dmax(cfg, strtoul(optarg, NULL, 10));
-      break;
-    case 'C':
-      use_cuda = 1;
-      break;
-    case 'c':
-      curves = (unsigned)strtoul(optarg, NULL, 10);
-      break;
-    case 'T':
-      threads = (unsigned)strtoul(optarg, NULL, 10);
-      has_threads = 1;
-      break;
-    case 'S':
-      sweep = (unsigned)strtoul(optarg, NULL, 10);
-      has_sweep = 1;
-      break;
-    case '?':
-      print_usage(stderr, 1);
-      break;
-    case -1:
-      break;
-    default:
-      abort();
+    case 'h': print_usage(stdout, 0); break;
+    case 'Q': Quiet = 1; break;
+    case 'q': quiet = 1; break;
+    case 'v': verbose = 1; break;
+    case 'o': gmpecpp_config_set_one_step(cfg, 1); break;
+    case 'H': gmpecpp_config_set_hilbert(cfg, 1); break;
+    case 'W': gmpecpp_config_set_weber(cfg, 1); break;
+    case 's': gmpecpp_config_set_seed(cfg, strtoul(optarg, NULL, 10)); break;
+    case 'p': gmpecpp_config_set_precision(cfg, strtoul(optarg, NULL, 10)); break;
+    case 'e': gmpecpp_config_set_error_shift(cfg, strtoul(optarg, NULL, 10)); break;
+    case 'B': gmpecpp_config_set_bmax(cfg, strtoul(optarg, NULL, 10)); break;
+    case 'D': gmpecpp_config_set_dmax(cfg, strtoul(optarg, NULL, 10)); break;
+    case 'C': use_cuda = 1; break;
+    case 'c': curves = (unsigned)strtoul(optarg, NULL, 10); break;
+    case 'T': threads = (unsigned)strtoul(optarg, NULL, 10); has_threads = 1; break;
+    case 'S': sweep = (unsigned)strtoul(optarg, NULL, 10); has_sweep = 1; break;
+    case '?': print_usage(stderr, 1); break;
+    case -1: break;
+    default: abort();
     }
   } while (next_option != -1);
 
   /* -Q, -q, neither, -v map onto the library's four verbosity levels. */
-  gmpecpp_config_set_verbosity(cfg, Quiet ? 0 : verbose ? 3 : quiet ? 1 : 2);
+  gmpecpp_config_set_verbosity(cfg,
+                               Quiet ? 0 : verbose ? 3 : quiet ? 1 : 2);
   gmpecpp_config_set_log(cfg, emit, NULL);
   if (has_threads)
     gmpecpp_config_set_threads(cfg, threads);
@@ -190,15 +144,9 @@ int main(int argc, char *argv[]) {
      tool deliberately does not, for compatibility. */
   int rc;
   switch (st) {
-  case GMPECPP_PROVEN_PRIME:
-    rc = 0;
-    break;
-  case GMPECPP_PROBABLY_PRIME:
-    rc = 1;
-    break;
-  default:
-    rc = 2;
-    break;
+  case GMPECPP_PROVEN_PRIME: rc = 0; break;
+  case GMPECPP_PROBABLY_PRIME: rc = 1; break;
+  default: rc = 2; break;
   }
 
   gmpecpp_certificate_free(cert);

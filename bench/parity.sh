@@ -1,5 +1,4 @@
 #!/bin/bash
-
 # parity -- is the library-backed tool still the original program?
 #
 # Compares stdout, stderr and exit status against a reference build of
@@ -10,7 +9,6 @@
 # Above the gate byte comparison is the WRONG test -- the GPU finds
 # different factorisations and so different, equally valid certificates.
 # Use gmpecpp-verify for that regime.
-
 set -u
 REF=${REF:-/tmp/gmp-ecpp-reference}
 SRC=${SRC:-gmp-ecpp.cpp}

@@ -1,12 +1,10 @@
 #!/bin/bash
-
 # thread-sweep -- how does the ECM stage scale with POSIX threads?
 #
 # ECM is a Las Vegas algorithm: curves are independent and the search
 # stops at the first success, so parallel speedup can exceed the thread
 # count -- running twenty curves at once finds a factor in the time of
 # the luckiest, not the average.  Expect scatter, and read the aggregate.
-
 set -u
 BIN=${BIN:-./gmp-ecpp}
 DATA=${DATA:-bench/primes.txt}

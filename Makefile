@@ -8,8 +8,6 @@
 CXX      = /usr/bin/g++
 CC       = /usr/bin/gcc
 CPPFLAGS = -D_GNU_SOURCE -D_XOPEN_SOURCE=700
-# Uncomment this if you want extra debugging messages
-# CPPFLAGS += GMPECPP_DEBUG
 CXXFLAGS = -O3 -Wall -Wextra -std=c++17
 CFLAGS   = -O3 -Wall -std=c17
 
@@ -31,9 +29,10 @@ LDLIBS := -lgmpxx -lgmp -lpthread
 # MPI (optional)                                                    #
 # ---------------------------------------------------------------- #
 #
-# Used only by gmpecpp-mpi, which distributes a batch of numbers across
-# ranks. A single ECPP downrun is sequential and offers nothing to
-# distribute; see README.md.
+# Used by gmpecpp-mpi, which distributes a batch of numbers across
+# ranks (a single ECPP downrun is sequential and offers nothing to
+# distribute; see README.md), and by gmpecmfft-mpi, which distributes
+# one number's ECM curves across GPUs (needs CUDA too).
 
 MPICC ?= $(shell command -v mpicc 2>/dev/null || \
            ls /usr/lib64/openmpi/bin/mpicc 2>/dev/null || echo mpicc)
@@ -45,10 +44,12 @@ else
   MPI_TARGET :=
 endif
 
+HERE       = $(shell pwd)
 NVCC      ?= $(shell command -v nvcc 2>/dev/null || echo /usr/local/cuda/bin/nvcc)
-CUDA_ARCH ?= sm_89
-# Change to this for Blackwell:
-# CUDA_ARCH ?= sm_120
+CUDA_ARCH ?= sm_120
+# sm_120 is the RTX PRO 4500 Blackwell (CUDA 13.2, which /usr/local/cuda
+# points to). For the RTX 4080 (Ada) use:
+# CUDA_ARCH ?= sm_89
 CGBN_INC  ?= /usr/local/include
 CUDA_LIB  ?= /usr/local/cuda/lib64
 
@@ -67,6 +68,28 @@ else
 endif
 
 NVCCFLAGS = -O3 -std=c++17 -arch=$(CUDA_ARCH)
+
+# cuFFT, for libgmpecmfft: ECM with FFT based modular arithmetic above
+# the widest CGBN instance (16352 bits). libcufft, not libcufftw: the
+# FFTW-style interface works on host arrays and would copy every operand
+# across PCIe on every call.
+CUFFT_HOME ?= /usr/local/cuda-13.2
+CUFFT_INC  ?= $(CUFFT_HOME)/include
+CUFFT_LIB  ?= $(CUFFT_HOME)/lib64
+
+FFT_LIB_SO := libgmpecmfft.so
+FFT_SONAME := $(FFT_LIB_SO).1
+FFT_LIB    := $(FFT_LIB_SO).1.0.0
+FFT_BIN    := gmpecmfft
+
+ifeq ($(CUDA),1)
+  FFT_TARGETS := $(FFT_LIB) $(FFT_BIN)
+  ifeq ($(MPI),1)
+    FFT_TARGETS += gmpecmfft-mpi
+  endif
+else
+  FFT_TARGETS :=
+endif
 
 # ---------------------------------------------------------------- #
 # Targets                                                           #
@@ -89,22 +112,59 @@ SEED ?= 1
 
 .PHONY: all clean check bench bench-all bench-reach bench-kernel bench-threads bench-sweep \
         bench-precision bench-cuda bench-profile parity verify-all \
-        doc format help cuda-info
+        bench-mpi-cgbn bench-cgbn-latency bench-gmp-profile \
+        doc format help cuda-info check-fft
 
-all: $(LIB) $(BIN) $(BENCH) $(REACH) $(KERNEL) $(VERIFY) $(MPI_TARGET)
+all: $(LIB) $(BIN) $(BENCH) $(REACH) $(KERNEL) $(VERIFY) $(MPI_TARGET) \
+     $(FFT_TARGETS)
 
 build:
 	@mkdir -p build
 
 build/gmpecpp.o: src/gmpecpp.cpp include/gmpecpp.h | build
 	$(CXX) $(CPPFLAGS) $(CUDA_CPPFLAGS) $(CXXFLAGS) -fPIC \
-	  -Iinclude -c $< -o $@
+	  -fvisibility=hidden -fvisibility-inlines-hidden \
+	  -I$(HERE)/include -c $< -o $@
 
 build/ecm_stub.o: src/ecm_stub.cpp | build
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -fPIC -Iinclude -c $< -o $@
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -fPIC -fvisibility=hidden \
+	  -I$(HERE)/include -c $< -o $@
 
 build/ecm_cuda.o: src/ecm_cuda.cu | build
-	$(NVCC) $(NVCCFLAGS) -Xcompiler -fPIC -I$(CGBN_INC) -Iinclude -c $< -o $@
+	$(NVCC) $(NVCCFLAGS) -Xcompiler -fPIC -I$(HERE)/include -I$(CGBN_INC) -c $< -o $@
+
+build/fftmod.o: src/fftmod.cu src/fftmod.cuh | build
+	$(NVCC) $(NVCCFLAGS) -Xcompiler -fPIC,-fvisibility=hidden \
+	  -I$(HERE)/include -I$(CUFFT_INC) -c $< -o $@
+
+build/fftpoly.o: src/fftpoly.cu src/fftpoly.cuh src/fftmod.cuh | build
+	$(NVCC) $(NVCCFLAGS) -Xcompiler -fPIC,-fvisibility=hidden \
+	  -I$(HERE)/include -I$(CUFFT_INC) -c $< -o $@
+
+build/ecmfft.o: src/ecmfft.cu src/fftmod.cuh src/fftpoly.cuh \
+                include/gmpecmfft.h include/gmpecpp.h | build
+	$(NVCC) $(NVCCFLAGS) -Xcompiler -fPIC,-fvisibility=hidden \
+	  -I$(HERE)/include -I$(CUFFT_INC) -c $< -o $@
+
+# Links against libgmpecpp, whose CGBN kernels it uses up to 16352 bits.
+$(FFT_LIB): build/fftmod.o build/fftpoly.o build/ecmfft.o $(LIB)
+	$(CXX) -shared -Wl,-soname,$(FFT_SONAME) -o $@ build/fftmod.o \
+	  build/fftpoly.o build/ecmfft.o -L. -lgmpecpp -L$(CUFFT_LIB) -lcufft \
+	  -L$(CUDA_LIB) -lcudart -lgmp -Wl,-rpath,'$$ORIGIN' \
+	  -Wl,-rpath,$(CUFFT_LIB) $(CUDA_RPATH)
+	ln -sf $(FFT_LIB) $(FFT_SONAME)
+	ln -sf $(FFT_SONAME) $(FFT_LIB_SO)
+
+$(FFT_BIN): tools/gmpecmfft.c $(FFT_LIB)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(HERE)/include -o $@ $< \
+	  -L. -lgmpecmfft -lgmp -Wl,-rpath,'$$ORIGIN'
+
+# One number's ECM curves across MPI ranks, one GPU each (cudart for
+# choosing the device).
+gmpecmfft-mpi: tools/gmpecmfft-mpi.c $(FFT_LIB)
+	$(MPICC) $(CPPFLAGS) $(CFLAGS) -I$(HERE)/include -I$(CUFFT_INC) -o $@ $< \
+	  -L. -lgmpecmfft -L$(CUDA_LIB) -lcudart -Wl,-rpath,'$$ORIGIN' \
+	  $(CUDA_RPATH)
 
 $(LIB): build/gmpecpp.o $(CUDA_OBJ)
 	$(CXX) -shared -Wl,-soname,$(SONAME) -o $@ $^ $(CUDA_LDFLAGS) $(LDLIBS)
@@ -112,38 +172,40 @@ $(LIB): build/gmpecpp.o $(CUDA_OBJ)
 	ln -sf $(SONAME) $(LIB_SO)
 
 $(BIN): tools/gmp-ecpp.cpp $(LIB)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -Iinclude -o $@ $< \
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -I$(HERE)/include -o $@ $< \
 	  -L. -lgmpecpp -lgmp -Wl,-rpath,'$$ORIGIN' $(CUDA_RPATH)
 
 # Independent certificate checker. Shares no code with the prover: the
 # point of a proof is that it can be checked without trusting the prover.
 $(VERIFY): tools/gmpecpp-verify.c $(LIB)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Iinclude -o $@ $< \
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(HERE)/include -o $@ $< \
 	  -L. -lgmpecpp -lgmp -Wl,-rpath,'$$ORIGIN' $(CUDA_RPATH)
 
 $(BENCH): bench/gmpecpp-bench.c $(LIB)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Iinclude -o $@ $< \
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(HERE)/include -o $@ $< \
 	  -L. -lgmpecpp -Wl,-rpath,'$$ORIGIN' $(CUDA_RPATH)
 
 # MPI + POSIX threads: ranks take whole numbers, threads split the ECM
 # curves inside each. Built only when an MPI compiler is present.
 gmpecpp-mpi: tools/gmpecpp-mpi.c $(LIB)
-	$(MPICC) $(CPPFLAGS) $(CFLAGS) -Iinclude -o $@ $< \
+	$(MPICC) $(CPPFLAGS) $(CFLAGS) -I$(HERE)/include -o $@ $< \
 	  -L. -lgmpecpp -Wl,-rpath,'$$ORIGIN' $(CUDA_RPATH)
 
 $(REACH): bench/ecm-reach.c $(LIB)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Iinclude -o $@ $< \
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(HERE)/include -o $@ $< \
 	  -L. -lgmpecpp -Wl,-rpath,'$$ORIGIN' $(CUDA_RPATH)
 
 $(KERNEL): bench/kernel-latency.c $(LIB)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Iinclude -o $@ $< \
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(HERE)/include -o $@ $< \
 	  -L. -lgmpecpp -Wl,-rpath,'$$ORIGIN' $(CUDA_RPATH)
 
 clean:
 	rm -rf build $(LIB) $(SONAME) $(LIB_SO) $(BIN) $(BENCH) $(REACH) \
-	  $(KERNEL) $(VERIFY) gmpecpp-mpi
+	  $(KERNEL) $(VERIFY) gmpecpp-mpi $(FFT_LIB) $(FFT_SONAME) \
+	  $(FFT_LIB_SO) $(FFT_BIN) gmpecmfft-mpi
 	rm -f gmpecpp-design.aux gmpecpp-design.log gmpecpp-design.out \
-	  gmpecpp-design.toc
+	  gmpecpp-design.toc gmp-or-cgbn.aux gmp-or-cgbn.log gmp-or-cgbn.out \
+	  gmp-or-cgbn.toc
 
 # Reformats in place per .clang-format. Note that clang-format 19 skips
 # the construct following any function whose return type is an
@@ -166,7 +228,7 @@ format:
 SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct -- gmpecpp-design.tex \
                        2>/dev/null || echo 0)
 
-doc: gmpecpp-design.pdf
+doc: gmpecpp-design.pdf gmp-or-cgbn.pdf
 
 gmpecpp-design.pdf: gmpecpp-design.tex
 	SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) FORCE_SOURCE_DATE=1 \
@@ -175,6 +237,19 @@ gmpecpp-design.pdf: gmpecpp-design.tex
 	  pdflatex -interaction=nonstopmode -halt-on-error gmpecpp-design.tex \
 	  && SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) FORCE_SOURCE_DATE=1 \
 	  pdflatex -interaction=nonstopmode -halt-on-error gmpecpp-design.tex
+
+# The GMP-or-CGBN report (CGBN-VS-GMP.md as LaTeX), stamped the same way
+# with its own last commit.
+GOC_SOURCE_DATE_EPOCH ?= $(or $(shell git log -1 --format=%ct -- gmp-or-cgbn.tex \
+                           2>/dev/null),0)
+
+gmp-or-cgbn.pdf: gmp-or-cgbn.tex
+	SOURCE_DATE_EPOCH=$(GOC_SOURCE_DATE_EPOCH) FORCE_SOURCE_DATE=1 \
+	  pdflatex -interaction=nonstopmode -halt-on-error gmp-or-cgbn.tex \
+	  && SOURCE_DATE_EPOCH=$(GOC_SOURCE_DATE_EPOCH) FORCE_SOURCE_DATE=1 \
+	  pdflatex -interaction=nonstopmode -halt-on-error gmp-or-cgbn.tex \
+	  && SOURCE_DATE_EPOCH=$(GOC_SOURCE_DATE_EPOCH) FORCE_SOURCE_DATE=1 \
+	  pdflatex -interaction=nonstopmode -halt-on-error gmp-or-cgbn.tex
 
 cuda-info:
 	@echo "MPI         : $(MPI) ($(MPICC))"
@@ -220,6 +295,13 @@ ifeq ($(CUDA),1)
 endif
 	@echo "== all smoke tests passed =="
 
+# libgmpecmfft: the FFT arithmetic against GMP at sizes from 200 bits to
+# a million, then ECM on identical curves -- FFT path vs CGBN at 2000
+# bits (stage 1 and 2 hit counts must match exactly) and, if gmp-ecm is
+# installed, FFT path vs GMP-ECM at 20000 bits, beyond CGBN's reach.
+check-fft: $(FFT_BIN)
+	bash bench/fft-check.sh
+
 # Each of these regenerates one of the tables in README.md. They are
 # separate targets because the sweeps take minutes, not seconds.
 #
@@ -256,6 +338,23 @@ bench-profile: $(BIN)
 	python3 bench/profile-phases.py -p 1000
 	python3 bench/profile-phases.py -p 10000
 
+# CPU (GMP) against CGBN. bench-cgbn-latency: one GMP operation vs one
+# CGBN operation vs a batch of 4096, 512 to 2048 bits. bench-gmp-profile:
+# where CPU time goes, by library, in the prover and gmpecmfft (perf).
+# bench-mpi-cgbn: gmpecpp-mpi with and without -C over 90-180 digit
+# primes, several layouts and seeds (~40 min).
+build/cgbn-latency: bench/cgbn-latency.cu | build
+	$(NVCC) $(NVCCFLAGS) -I$(CGBN_INC) -o $@ $< -lgmp
+
+bench-cgbn-latency: build/cgbn-latency
+	./build/cgbn-latency
+
+bench-gmp-profile: $(BIN) $(FFT_BIN)
+	bash bench/gmp-profile.sh
+
+bench-mpi-cgbn: gmpecpp-mpi
+	bash bench/mpi-cgbn.sh build/bench-mpi-cgbn
+
 # Byte-identity against a reference build of the original program.
 # EXTRA=-C additionally checks the CUDA backend stays inert below the gate.
 parity: $(BIN)
@@ -288,13 +387,19 @@ help:
 	@echo "make doc        build gmpecpp-design.pdf (byte-reproducible)"
 	@echo "make format     clang-format the sources"
 	@echo "make cuda-info  show the detected CUDA configuration"
+	@echo "make check-fft  libgmpecmfft: FFT arithmetic vs GMP, and FFT vs"
+	@echo "                CGBN on identical curves (minutes)"
+	@echo "echo N | ./$(FFT_BIN) [-1 B1] [-2 B2] [-c C] [-v]   GPU ECM, any size"
 	@echo
-	@echo "CUDA=0 forces a CPU-only build; MPI=0 skips gmpecpp-mpi."
+	@echo "CUDA=0 forces a CPU-only build; MPI=0 skips gmpecpp-mpi and"
+	@echo "gmpecmfft-mpi."
 	@echo "Both are auto-detected otherwise."
 	@echo
 	@echo "Parallelism:  ./gmp-ecpp -T N   ECM worker threads (0 = one per CPU)"
 	@echo "              ./gmp-ecpp -S N   discriminant sweep threads"
 	@echo "              mpirun -n R ./gmpecpp-mpi -T N file   batch across ranks"
+	@echo "echo N | mpirun -n G+1 ./gmpecmfft-mpi [-1 B1] [-v]   ECM on G GPUs"
+	@echo "echo N | tools/gmpecmfft-slurm submit -d DIR -n G ...  ... as a Slurm array"
 	@echo "The number under test is read from stdin, not argv:"
 	@echo "    echo 1000000000000000000000000000057 | ./$(BIN) -Q"
 

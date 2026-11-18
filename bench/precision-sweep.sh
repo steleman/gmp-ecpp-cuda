@@ -1,12 +1,10 @@
 #!/bin/bash
-
 # precision-sweep -- compare working precisions across input sizes.
 #
 # Produces the "Precision is the dominant knob" table in README.md, and
 # is the evidence behind the default having been lowered to 1000 bits.
 # Every input must still prove at the lower precision; a nonzero exit
 # status in either column is a failure, not a datapoint.
-
 set -u
 BIN=${BIN:-./gmp-ecpp}
 DATA=${DATA:-bench/primes.txt}

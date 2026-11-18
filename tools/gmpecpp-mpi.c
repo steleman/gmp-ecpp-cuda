@@ -21,8 +21,14 @@
  * inputs -- a static split would leave most ranks idle behind one
  * straggler.
  *
- * Usage:  mpirun -n R ./gmpecpp-mpi [-T threads] [-C] file
+ * Usage:  mpirun -n R ./gmpecpp-mpi [-T threads] [-C] [-s seed] file
  *         where file holds one number per line ("digits value" also works).
+ *
+ * -s sets the prover's seed (default 1). Every proof reseeds from it, so a
+ * number's proof does not depend on which rank takes it or in what order.
+ * With -T > 1 it can still vary from run to run: the threaded ECM is a
+ * race (the first thread to find a factor wins), and a different factor
+ * leads the downrun elsewhere.
  */
 
 #include <mpi.h>
@@ -73,15 +79,17 @@ int main(int argc, char **argv) {
   MPI_Comm_size(MPI_COMM_WORLD, &size);
 
   unsigned threads = 1;
+  unsigned long seed = 1;
   int use_cuda = 0;
   const char *path = NULL;
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "-T") && i + 1 < argc) threads = (unsigned)strtoul(argv[++i], NULL, 10);
     else if (!strcmp(argv[i], "-C")) use_cuda = 1;
+    else if (!strcmp(argv[i], "-s") && i + 1 < argc) seed = strtoul(argv[++i], NULL, 10);
     else path = argv[i];
   }
   if (!path) {
-    if (rank == 0) fprintf(stderr, "usage: mpirun -n R %s [-T threads] [-C] file\n", argv[0]);
+    if (rank == 0) fprintf(stderr, "usage: mpirun -n R %s [-T threads] [-C] [-s seed] file\n", argv[0]);
     MPI_Finalize();
     return 1;
   }
@@ -101,7 +109,7 @@ int main(int argc, char **argv) {
   if (size == 1) {
     /* Degenerate case: no workers to hand out to, so just do the work. */
     gmpecpp_config_t *cfg = gmpecpp_config_new();
-    gmpecpp_config_set_seed(cfg, 1);
+    gmpecpp_config_set_seed(cfg, seed);
     gmpecpp_config_set_verbosity(cfg, 0);
     gmpecpp_config_set_log(cfg, quiet, NULL);
     gmpecpp_config_set_threads(cfg, threads);
@@ -141,13 +149,14 @@ int main(int argc, char **argv) {
       busy += res[i].seconds;
     }
     double wall = MPI_Wtime() - t_start;
-    printf("\n%d numbers over %d ranks x %u threads: wall %.2fs, "
-           "summed proof time %.2fs, speedup %.2fx\n",
-           count, size - 1, threads, wall, busy, busy / wall);
+    printf("\n%d numbers over %d ranks x %u threads (seed %lu%s): wall "
+           "%.2fs, summed proof time %.2fs, speedup %.2fx\n",
+           count, size - 1, threads, seed, use_cuda ? ", CUDA" : "", wall,
+           busy, busy / wall);
     free(res);
   } else {
     gmpecpp_config_t *cfg = gmpecpp_config_new();
-    gmpecpp_config_set_seed(cfg, 1);
+    gmpecpp_config_set_seed(cfg, seed);
     gmpecpp_config_set_verbosity(cfg, 0);
     gmpecpp_config_set_log(cfg, quiet, NULL);
     gmpecpp_config_set_threads(cfg, threads);

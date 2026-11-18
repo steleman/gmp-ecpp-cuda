@@ -1,0 +1,211 @@
+#!/bin/bash
+# gmpecmfft-slurm -- GPU ECM on one number across a Slurm job array: one
+# array task per GPU, each running gmpecmfft batches until a factor is
+# found anywhere.
+#
+#   gmpecmfft-slurm submit -d DIR -n TASKS [-1 B1] [-2 B2] [-c CURVES]
+#                          [-s SEED] [-b BATCHES] [-F] [--dry-run] [N]
+#                          [-- SBATCH-OPTIONS...]
+#   gmpecmfft-slurm status DIR
+#   gmpecmfft-slurm task DIR          (what each array task runs)
+#
+# submit writes the run to DIR (which must be on a filesystem every node
+# sees) and submits an array of TASKS tasks, one GPU each. N is read
+# from stdin when not given; everything after -- goes to sbatch as is
+# (partition, time limit, account, ...); --dry-run prints the sbatch
+# command instead of running it. Options as gmpecmfft's; -b is batches
+# per task (0: until a factor is found).
+#
+# The same batches as gmpecmfft-mpi, without a coordinator. Batch b runs
+# `gmpecmfft -s SEED+b -c CURVES`; array task t of T runs batches t,
+# t+T, t+2T, ... (BATCHES of them, or until a factor turns up when
+# BATCHES is 0), so the batches are distinct and any one is reproduced on
+# a single GPU with that command.
+#
+# Stopping goes through DIR, which must be on a filesystem every node
+# sees. The first task to find a factor claims it (mkdir DIR/found is
+# atomic), writes it to DIR/found/factor, creates DIR/STOP, and cancels
+# the rest of the array with scancel: running tasks get SIGTERM, which
+# gmpecmfft treats as a stop. Should scancel be unavailable or refused,
+# running batches still stop within about a quarter second of DIR/STOP
+# appearing (gmpecmfft --stop-file), and tasks check it before each
+# batch.
+#
+# Each task appends one line per batch to DIR/results.TASK: batch, seed,
+# curves, exit status, seconds. `status` sums them up.
+#
+# Use one kind of GPU for the array: tasks run batches of equal size, so
+# with a mix the faster GPUs finish their share and then sit idle at the
+# end while the slower ones complete theirs.
+#
+# Copyright (c) 2026 Stefan Teleman and contributors.
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.  See <http://www.gnu.org/licenses/>.
+
+set -u
+SELF=$(readlink -f "$0")
+
+die() {
+  echo "gmpecmfft-slurm: $*" >&2
+  exit 3
+}
+
+usage() {
+  sed -n '2,/^# Copyright/p' "$SELF" | sed '$d; s/^# \{0,1\}//'
+}
+
+# ------------------------------------------------------------------ #
+
+submit() {
+  local dir="" tasks="" b1=10000 b2="" curves=0 seed=1 batches=0 fft=0
+  local dry=0 n=""
+  local -a sb=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+    -d) dir=$2; shift 2 ;;
+    -n) tasks=$2; shift 2 ;;
+    -1) b1=$2; shift 2 ;;
+    -2) b2=$2; shift 2 ;;
+    -c) curves=$2; shift 2 ;;
+    -s) seed=$2; shift 2 ;;
+    -b) batches=$2; shift 2 ;;
+    -F) fft=1; shift ;;
+    --dry-run) dry=1; shift ;;
+    --) shift; sb=("$@"); break ;;
+    -h|--help) usage; exit 0 ;;
+    -*) die "unknown option $1" ;;
+    *) n=$1; shift ;;
+    esac
+  done
+  [ -n "$dir" ] || die "submit: -d DIR is required"
+  [ -n "$tasks" ] && [ "$tasks" -ge 1 ] 2>/dev/null ||
+    die "submit: -n TASKS (number of GPUs) is required"
+  [ -n "$n" ] || n=$(tr -d ' \t\r\n' </dev/stdin)
+  [[ "$n" =~ ^[0-9]+$ ]] || die "submit: N must be a decimal number"
+  # As gmpecmfft: B2 defaults to 100 B1 below B1 = 50000, 50 B1 from
+  # there; seed 0 is read as 1 (keeps batch seeds distinct).
+  b1=$(printf '%.0f' "$b1")
+  if [ -z "$b2" ]; then
+    if [ "$b1" -ge 50000 ]; then b2=$((50 * b1)); else b2=$((100 * b1)); fi
+  else
+    b2=$(printf '%.0f' "$b2")
+  fi
+  [ "$seed" -ge 1 ] 2>/dev/null || seed=1
+
+  local bin
+  bin=$(readlink -f "${GMPECMFFT:-$(dirname "$SELF")/../gmpecmfft}") ||
+    die "cannot find gmpecmfft (set GMPECMFFT)"
+  [ -x "$bin" ] || die "$bin is not executable (set GMPECMFFT)"
+  mkdir -p "$dir" || die "cannot create $dir"
+  dir=$(readlink -f "$dir")
+  [ -e "$dir/params" ] && die "$dir already holds a run (use a new DIR)"
+  printf '%s\n' "$n" >"$dir/n"
+  cat >"$dir/params" <<EOF
+BIN=$bin
+TASKS=$tasks
+B1=$b1
+B2=$b2
+CURVES=$curves
+SEED=$seed
+BATCHES=$batches
+FFT=$fft
+EOF
+  local -a cmd=(sbatch --array="0-$((tasks - 1))" --gres=gpu:1
+    --job-name=gmpecmfft --output="$dir/task-%a.out" "${sb[@]}"
+    --wrap="$(printf '%q task %q' "$SELF" "$dir")")
+  if [ $dry -eq 1 ]; then
+    printf '%q ' "${cmd[@]}"
+    echo
+    return 0
+  fi
+  "${cmd[@]}"
+}
+
+# ------------------------------------------------------------------ #
+
+task() {
+  local dir=$1
+  [ -r "$dir/params" ] || die "task: no $dir/params"
+  # shellcheck disable=SC1091
+  . "$dir/params"
+  local t=${SLURM_ARRAY_TASK_ID:?not in a job array}
+  local T=${SLURM_ARRAY_TASK_COUNT:-$TASKS}
+  local n
+  n=$(cat "$dir/n")
+  local -a fflag=()
+  [ "$FFT" = 1 ] && fflag=(-F)
+  local j=0
+  while [ "$BATCHES" -eq 0 ] || [ $j -lt "$BATCHES" ]; do
+    [ -e "$dir/STOP" ] && break
+    local b=$((t + j * T)) s=$((SEED + t + j * T))
+    local t0 t1 st f
+    t0=$(date +%s.%N)
+    f=$(printf '%s\n' "$n" | "$BIN" -1 "$B1" -2 "$B2" -c "$CURVES" -s "$s" \
+      "${fflag[@]}" --stop-file "$dir/STOP")
+    st=$?
+    t1=$(date +%s.%N)
+    printf '%d %d %s %d %.2f\n' "$b" "$s" "$CURVES" "$st" \
+      "$(echo "$t1 - $t0" | bc)" >>"$dir/results.$t"
+    if [ $st -eq 0 ]; then
+      if mkdir "$dir/found" 2>/dev/null; then # the first find wins
+        printf '%s\n' "$f" >"$dir/found/factor.tmp"
+        printf 'task %d batch %d seed %d curves %s\n' "$t" "$b" "$s" \
+          "$CURVES" >"$dir/found/where"
+        mv "$dir/found/factor.tmp" "$dir/found/factor"
+      fi
+      touch "$dir/STOP"
+      if [ -n "${SLURM_ARRAY_JOB_ID:-}" ] && command -v scancel >/dev/null
+      then
+        scancel "$SLURM_ARRAY_JOB_ID" 2>/dev/null
+      fi
+      break
+    fi
+    [ $st -eq 1 ] || break # stopped (2), or an error: this task ends
+    j=$((j + 1))
+  done
+  return 0
+}
+
+# ------------------------------------------------------------------ #
+
+status() {
+  local dir=$1
+  [ -r "$dir/params" ] || die "status: no $dir/params"
+  # shellcheck disable=SC1091
+  . "$dir/params"
+  cat "$dir"/results.* 2>/dev/null | awk -v curves="$CURVES" '
+    { n++; t += $5
+      if ($4 == 0 || $4 == 1) { done++; if (curves > 0) c += $3 }
+      else if ($4 == 2) stopped++
+      else err++ }
+    END {
+      printf "%d batches run: %d completed", n, done
+      if (curves > 0) printf " (%d curves)", c
+      printf ", %d stopped, %d failed; %.2f s of batch time\n",
+             stopped, err, t }'
+  if [ -r "$dir/found/factor" ]; then
+    echo "factor $(cat "$dir/found/factor") ($(cat "$dir/found/where"))"
+    echo "on one GPU: gmpecmfft -1 $B1 -2 $B2 -c $CURVES -s" \
+      "$(awk '{print $6}' "$dir/found/where")"
+    return 0
+  fi
+  [ -e "$dir/STOP" ] && echo "stopped, no factor recorded" && return 2
+  echo "no factor found (yet)"
+  return 1
+}
+
+# ------------------------------------------------------------------ #
+
+[ $# -ge 1 ] || { usage >&2; exit 3; }
+cmd=$1
+shift
+case "$cmd" in
+submit) submit "$@" ;;
+task) [ $# -eq 1 ] || die "usage: task DIR"; task "$1" ;;
+status) [ $# -eq 1 ] || die "usage: status DIR"; status "$1" ;;
+-h|--help|help) usage ;;
+*) die "unknown command $cmd (submit, status, task)" ;;
+esac

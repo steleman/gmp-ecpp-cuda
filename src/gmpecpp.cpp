@@ -90,7 +90,7 @@ struct State {
   gmpecpp_log_fn log_fn;
   void *log_user;
   int verbosity;
-  std::string pending; // partial line awaiting its newline
+  std::string pending;             // partial line awaiting its newline
   std::vector<Recorded> steps;
   std::string factor;
   GiveUp give_up;
@@ -150,8 +150,13 @@ bool cuda_available();
 const char *cuda_device_name();
 bool cuda_ecm_factor(mpz_srcptr n, unsigned long b1, unsigned int curves,
                      unsigned long seed, mpz_ptr factor);
+int cuda_ecm_run(mpz_srcptr n, unsigned long b1, unsigned long b2,
+                 unsigned int curves, unsigned long seed, int (*stop)(void *),
+                 void *stop_arg, mpz_ptr factor);
+unsigned int cuda_ecm_default_curves(size_t bits);
 
 } // namespace gmpecpp_detail
+
 
 gmp_randstate_t rstate;
 
@@ -383,7 +388,8 @@ int32_t addition_1(mpz_class n, struct point P1, struct point P2,
 
 // affine coords
 // P1 == P2
-void addition_2(mpz_class a, mpz_class n, struct point P1, struct point *P3) {
+void addition_2(mpz_class a, mpz_class n, struct point P1,
+                struct point *P3) {
   mpz_class m;
 
   // calculate m = (3x1 ^ 2 + a)(2y1) ^ -1 mod n
@@ -676,9 +682,8 @@ void print_mpf(mpf_class x) {
   mpf_set_default_prec(precision);
 
   char *s = NULL;
-  if (gmp_asprintf(&s, "%.*Ff", (int)(LOG2 * (x.get_prec())), x.get_mpf_t()) >=
-          0 &&
-      s) {
+  if (gmp_asprintf(&s, "%.*Ff", (int)(LOG2 * (x.get_prec())),
+                   x.get_mpf_t()) >= 0 && s) {
     gmpecpp_detail::log() << s;
     free(s);
   }
@@ -2230,8 +2235,7 @@ static void *ecm_thread(void *arg) {
       int32_t hit = 0;
 
       newq = 2;
-      for (; newq < B && hit != 1 &&
-             !sh->found.load(std::memory_order_relaxed);) {
+      for (; newq < B && hit != 1 && !sh->found.load(std::memory_order_relaxed);) {
         q = newq;
         q1 = q;
         l = B / q;
@@ -2293,7 +2297,7 @@ int32_t LenstrasECM_mt(mpz_class *N, mpz_class *g, mpz_class bound,
     pthread_join(th[i], NULL);
   pthread_mutex_destroy(&sh.mtx);
 
-  if (!started) // could not create any thread; fall back
+  if (!started)               // could not create any thread; fall back
     return LenstrasECM(N, g, bound);
 
   if (!sh.found.load(std::memory_order_relaxed))
@@ -2402,10 +2406,16 @@ int32_t ecm_find_factor(mpz_class *N, mpz_class *g, mpz_class bound) {
       b1 = 1000;
     if (b1 > 100000)
       b1 = 100000;
+    // Stage 1 and stage 2 on the GPU (the resumable kernels behind
+    // gmpecpp_cuda_ecm()). B2 follows what measured best per curve-second:
+    // 100*B1 below 5*10^4, 50*B1 from there up. Stage 2 makes each curve
+    // about ten times likelier to split the cofactor for under twice the time.
+    const unsigned long b2 = (b1 >= 50000UL ? 50UL : 100UL) * b1;
     mpz_t f;
     mpz_init(f);
-    if (gmpecpp_detail::cuda_ecm_factor(N->get_mpz_t(), b1, curves,
-                                        gmpecpp_detail::g_seed, f)) {
+    if (gmpecpp_detail::cuda_ecm_run(N->get_mpz_t(), b1, b2, curves,
+                                     gmpecpp_detail::g_seed, nullptr,
+                                     nullptr, f) == 1) {
       *g = mpz_class(f);
       *N /= *g;
       found = 1;
@@ -2560,7 +2570,7 @@ enum SweepOutcome { SWEEP_REJECTED = 0, SWEEP_FOUND = 1, SWEEP_COMPOSITE = 2 };
 
 struct SweepResult {
   int outcome;
-  int tag; // which "N factor =" message a composite came from
+  int tag;              // which "N factor =" message a composite came from
   int64_t D;
   mpz_class a, b, m, q;
   struct point P, P1, P2;
@@ -2591,225 +2601,208 @@ static SweepOutcome try_discriminant(int64_t D, const mpz_class &Ni,
 
   r->D = D;
 
-  found = false;
-  found2 = false;
+        found = false;
+        found2 = false;
 
-  if (verbose) {
-    gmpecpp_detail::log() << D << '\r';
-  }
-
-#if defined(GMPECPP_DEBUG)
-  gmpecpp_detail::log() << "Step 3\n";
-#endif
-
-  if (JACOBI(D + Ni, Ni) != 1)
-    return SWEEP_REJECTED;
-  if (!modified_Cornacchia(D, Ni, &u, &v))
-    return SWEEP_REJECTED;
-
-#if defined(GMPECPP_DEBUG)
-  gmpecpp_detail::log() << "Step 4\n";
-#endif
-
-  t = sqrt(sqrt(Ni)) + 1;
-  t = t * t;
-
-  if (check_for_factor(&q, m = Ni + 1 + u, t))
-    found = true;
-  else if (check_for_factor(&q, m = Ni + 1 - u, t))
-    found = true;
-  else if (D == -4) {
-    if (check_for_factor(&q, m = Ni + 1 + 2 * v, t))
-      found = true;
-    else if (check_for_factor(&q, m = Ni + 1 - 2 * v, t))
-      found = true;
-  } else if (D == -3) {
-    if (check_for_factor(&q, m = Ni + 1 + (u + 3 * v) / 2, t))
-      found = true;
-    else if (check_for_factor(&q, m = Ni + 1 - (u + 3 * v) / 2, t))
-      found = true;
-    else if (check_for_factor(&q, m = Ni + 1 + (u - 3 * v) / 2, t))
-      found = true;
-    else if (check_for_factor(&q, m = Ni + 1 - (u - 3 * v) / 2, t))
-      found = true;
-  }
-
-  if (!found)
-    return SWEEP_REJECTED;
-
-#if defined(GMPECPP_DEBUG)
-  gmpecpp_detail::log() << "Step 6\n";
-#endif
-
-  rootSize = 0;
-
-  for (int32_t type = 0; type <= 2; type++) {
-
-    if (!find_curve(type, &a, &b, D, Ni, root, &rootSize))
-      continue;
-
-    for (int64_t roots_tried = 0; roots_tried < rootSize; roots_tried++) {
-      if (type == 0) {
-        a = modpos(a, Ni);
-        b = modpos(b, Ni);
-      }
-
-      else if (hilbert && type == 1) {
-        j = modpos(root[roots_tried], Ni);
-
-        if (!Quiet) {
-          gmpecpp_detail::log() << "j = " << j << "\n";
+        if (verbose) {
+          gmpecpp_detail::log() << D << '\r';
         }
 
-        mpz_class c;
-        c = modpos(j * inverse(j - 1728, Ni), Ni);
-        a = modpos(-3 * c, Ni);
-        b = modpos(2 * c, Ni);
-      }
+        //  gmpecpp_detail::log() << "Step 3\n";
 
-      else if (weber && type == 2) {
-        w = modpos(root[roots_tried], Ni);
+        if (JACOBI(D + Ni, Ni) != 1)
+          return SWEEP_REJECTED;
+        if (!modified_Cornacchia(D, Ni, &u, &v))
+          return SWEEP_REJECTED;
 
-        if (!Quiet) {
-          gmpecpp_detail::log() << "u = " << w << "\n";
+        //  gmpecpp_detail::log() << "Step 4\n";
+
+        t = sqrt(sqrt(Ni)) + 1;
+        t = t * t;
+
+        if (check_for_factor(&q, m = Ni + 1 + u, t))
+          found = true;
+        else if (check_for_factor(&q, m = Ni + 1 - u, t))
+          found = true;
+        else if (D == -4) {
+          if (check_for_factor(&q, m = Ni + 1 + 2 * v, t))
+            found = true;
+          else if (check_for_factor(&q, m = Ni + 1 - 2 * v, t))
+            found = true;
+        } else if (D == -3) {
+          if (check_for_factor(&q, m = Ni + 1 + (u + 3 * v) / 2, t))
+            found = true;
+          else if (check_for_factor(&q, m = Ni + 1 - (u + 3 * v) / 2, t))
+            found = true;
+          else if (check_for_factor(&q, m = Ni + 1 + (u - 3 * v) / 2, t))
+            found = true;
+          else if (check_for_factor(&q, m = Ni + 1 - (u - 3 * v) / 2, t))
+            found = true;
         }
 
-        if (D % 4 == 0)
-          j = Vegas(w, Ni, D / 4);
-        else
-          j = Vegas(w, Ni, D);
+        if (!found)
+          return SWEEP_REJECTED;
 
-        if (!Quiet) {
-          gmpecpp_detail::log() << "j = " << j << "\n";
-        }
+        //  gmpecpp_detail::log() << "Step 6\n";
 
-        mpz_class c;
-        c = modpos(j * inverse(j - 1728, Ni), Ni);
-        a = modpos(-3 * c, Ni);
-        b = modpos(2 * c, Ni);
-      }
+        rootSize = 0;
 
-#if defined(GMPECPP_DEBUG)
-      gmpecpp_detail::log() << "Step 7\n";
-#endif
+        for (int32_t type = 0; type <= 2; type++) {
 
-      do {
-        do
-          g = modpos(rand2_r(st), Ni);
-        while (g == 0);
-        if (JACOBI(g, Ni) != -1)
-          continue;
-        if (D == -3) // Cohen
-                     // if (Ni % 3 == 1) // Studholme
-          if (exp_mod(g, (Ni - 1) / 3, Ni) == 1)
+          if (!find_curve(type, &a, &b, D, Ni, root, &rootSize))
             continue;
-        break;
-      } while (true);
 
-#if defined(GMPECPP_DEBUG)
-      gmpecpp_detail::log() << "Step 8\n";
-#endif
+          for (int64_t roots_tried = 0; roots_tried < rootSize; roots_tried++) {
+            if (type == 0) {
+              a = modpos(a, Ni);
+              b = modpos(b, Ni);
+            }
 
-      points_tried = 0;
+            else if (hilbert && type == 1) {
+              j = modpos(root[roots_tried], Ni);
 
-      do {
-        do {
-          do {
-            do
-              x = modpos(rand2_r(st), Ni);
-            while (x == 0);
-            y = modpos(((x * x) % Ni * x) % Ni + a * x + b, Ni);
-          } while (JACOBI(y, Ni) == -1);
-          y = square_root_mod(y, Ni);
-        } while (y == 0);
+              if (!Quiet) {
+                gmpecpp_detail::log() << "j = " << j << "\n";
+              }
 
-#if defined(GMPECPP_DEBUG)
-        gmpecpp_detail::log() << "Step 9\n";
-#endif
+              mpz_class c;
+              c = modpos(j * inverse(j - 1728, Ni), Ni);
+              a = modpos(-3 * c, Ni);
+              b = modpos(2 * c, Ni);
+            }
 
-        P.x = x, P.y = y;
-        points_tried++;
-        k = 0;
+            else if (weber && type == 2) {
+              w = modpos(root[roots_tried], Ni);
 
-        do {
-#if defined(GMPECPP_DEBUG)
-          gmpecpp_detail::log() << "Step 12\n";
-#endif
-          value2 = multiply(a, m / q, Ni, P, &P2, &d);
+              if (!Quiet) {
+                gmpecpp_detail::log() << "u = " << w << "\n";
+              }
 
-          if (value2 == 1) {
-            r->factor = mpz_class(d).get_str();
-            r->tag = 3;
-            r->outcome = SWEEP_COMPOSITE;
-            return SWEEP_COMPOSITE;
+              if (D % 4 == 0)
+                j = Vegas(w, Ni, D / 4);
+              else
+                j = Vegas(w, Ni, D);
+
+              if (!Quiet) {
+                gmpecpp_detail::log() << "j = " << j << "\n";
+              }
+
+              mpz_class c;
+              c = modpos(j * inverse(j - 1728, Ni), Ni);
+              a = modpos(-3 * c, Ni);
+              b = modpos(2 * c, Ni);
+            }
+
+            //  gmpecpp_detail::log() << "Step 7\n";
+
+            do {
+              do
+                g = modpos(rand2_r(st), Ni);
+              while (g == 0);
+              if (JACOBI(g, Ni) != -1)
+                continue;
+              if (D == -3) // Cohen
+                           //							if
+                           //(Ni % 3 == 1) // Studholme
+                if (exp_mod(g, (Ni - 1) / 3, Ni) == 1)
+                  continue;
+              break;
+            } while (true);
+
+            //  gmpecpp_detail::log() << "Step 8\n";
+
+            points_tried = 0;
+
+            do {
+
+              do {
+                do {
+                  do
+                    x = modpos(rand2_r(st), Ni);
+                  while (x == 0);
+                  y = modpos(((x * x) % Ni * x) % Ni + a * x + b, Ni);
+                } while (JACOBI(y, Ni) == -1);
+                y = square_root_mod(y, Ni);
+              } while (y == 0);
+
+              //  gmpecpp_detail::log() << "Step 9\n";
+
+              P.x = x, P.y = y;
+              points_tried++;
+              k = 0;
+
+              do {
+                //  gmpecpp_detail::log() << "Step 12\n";
+
+                value2 = multiply(a, m / q, Ni, P, &P2, &d);
+
+                if (value2 == 1) {
+                  r->factor = mpz_class(d).get_str();
+                  r->tag = 3;
+                  r->outcome = SWEEP_COMPOSITE;
+                  return SWEEP_COMPOSITE;
+                }
+
+                value1 = multiply(a, q, Ni, P2, &P1, &d);
+
+                if (value1 == 1) {
+                  r->factor = mpz_class(d).get_str();
+                  r->tag = 2;
+                  r->outcome = SWEEP_COMPOSITE;
+                  return SWEEP_COMPOSITE;
+                }
+
+                if ((value1 == -1) && (value2 == 0)) {
+                  //  gmpecpp_detail::log() << "Step 13\n";
+
+                  found2 = true;
+                  break;
+                }
+
+                //  gmpecpp_detail::log() << "Step 10\n";
+
+                ++k;
+
+                if (D == -3) {
+                  if (k >= 6)
+                    break;
+                  b *= g;
+                } else if (D == -4) {
+                  if (k >= 4)
+                    break;
+                  a *= g;
+                } else {
+                  if (k >= 2)
+                    break;
+                  a *= (g * g);
+                  b *= (g * g * g);
+                }
+
+                a = modpos(a, Ni);
+                b = modpos(b, Ni);
+
+              } while (true);
+
+            } while (!found2 && points_tried < 100);
+
+            if (found2)
+              break;
           }
 
-          value1 = multiply(a, q, Ni, P2, &P1, &d);
-
-          if (value1 == 1) {
-            r->factor = mpz_class(d).get_str();
-            r->tag = 2;
-            r->outcome = SWEEP_COMPOSITE;
-            return SWEEP_COMPOSITE;
-          }
-
-          if ((value1 == -1) && (value2 == 0)) {
-#if defined(GMPECPP_DEBUG)
-            gmpecpp_detail::log() << "Step 13\n";
-#endif
-            found2 = true;
+          if (found2)
             break;
-          }
+        }
 
-#if defined(GMPECPP_DEBUG)
-          gmpecpp_detail::log() << "Step 10\n";
-#endif
-
-          ++k;
-
-          if (D == -3) {
-            if (k >= 6)
-              break;
-            b *= g;
-          } else if (D == -4) {
-            if (k >= 4)
-              break;
-            a *= g;
-          } else {
-            if (k >= 2)
-              break;
-            a *= (g * g);
-            b *= (g * g * g);
-          }
-
-          a = modpos(a, Ni);
-          b = modpos(b, Ni);
-
-        } while (true);
-
-      } while (!found2 && points_tried < 100);
-
-      if (found2)
-        break;
-    }
-
-    if (found2)
-      break;
-  }
 
   if (!found2)
     return SWEEP_REJECTED;
 
   r->outcome = SWEEP_FOUND;
-  r->a = a;
-  r->b = b;
-  r->m = m;
-  r->q = q;
-  r->P = P;
-  r->P1 = P1;
-  r->P2 = P2;
+  r->a = a; r->b = b; r->m = m; r->q = q;
+  r->P = P; r->P1 = P1; r->P2 = P2;
   return SWEEP_FOUND;
 }
+
 
 /*
  * Parallel discriminant sweep (POSIX threads).
@@ -2836,12 +2829,12 @@ static SweepOutcome try_discriminant(int64_t D, const mpz_class &Ni,
  */
 struct SweepShared {
   const mpz_class *Ni;
-  int64_t limit; // stop when index reaches this
+  int64_t limit;          // stop when index reaches this
   unsigned long seed;
   int nthreads;
 
   std::atomic<int64_t> next_n;
-  std::atomic<int64_t> best_n; // smallest index that succeeded so far
+  std::atomic<int64_t> best_n;   // smallest index that succeeded so far
   pthread_mutex_t mtx;
   SweepResult best;
   int have;
@@ -2858,7 +2851,7 @@ static void *sweep_thread(void *arg) {
 
   gmp_randstate_t st;
   gmp_randinit_default(st);
-  tls_rand = st; // everything below this point draws from it
+  tls_rand = st;   // everything below this point draws from it
 
   // FindRootsModuloAPrime reads the incoming contents of this array, so
   // it is state that persists between attempts rather than scratch. The
@@ -2982,22 +2975,23 @@ static int sweep_parallel(const mpz_class &Ni, int64_t limit, int nthreads,
 } // namespace gmpecpp_detail
 
 int32_t Atkin(mpz_class N) {
+  int32_t value1, value2;
   int64_t p;
   mpz_class Ni = N, a, b, d, i = 0, m, q, t, x, y;
   struct point P, P1, P2;
-  int64_t n = 0;
+  int64_t n = 0, k = 0;
   int64_t D;
-  bool found = false;
+  bool found = false, found2 = false;
   mpz_class u, v;
   mpz_class g;
+  int64_t points_tried = 0;
   mpz_class root[POLY_SIZE];
+  int64_t rootSize = 0;
   mpz_class j, w;
 
   do {
 
-#if defined(GMPECPP_DEBUG)
-    gmpecpp_detail::log() << "Step 2\n";
-#endif
+    //  gmpecpp_detail::log() << "Step 2\n";
 
     if (Ni <= SIEVE_LIMIT) {
       p = 2;
@@ -3016,12 +3010,15 @@ int32_t Atkin(mpz_class N) {
       return 2;
 
     while (Bmax <= 2000000000 && Dmax <= 312500) {
+
       // The original cleared these at the top of every discriminant
       // attempt, inside the loop body. That body is now a function with
       // its own locals, so Atkin's copies have to be cleared here --
       // otherwise a sweep that finds nothing inherits the previous
       // downrun step's success and proceeds with its stale curve.
       found = false;
+      found2 = false;
+
 
       if (!Quiet) {
         gmpecpp_detail::log() << "Bmax = " << Bmax << "\n";
@@ -3034,8 +3031,7 @@ int32_t Atkin(mpz_class N) {
         // Speculative parallel sweep. Deterministic, and it settles on the
         // same discriminant the sequential walk below would reach.
         gmpecpp_detail::SweepResult sr;
-        if (gmpecpp_detail::sweep_parallel(Ni, Dmax,
-                                           gmpecpp_detail::g_sweep_threads,
+        if (gmpecpp_detail::sweep_parallel(Ni, Dmax, gmpecpp_detail::g_sweep_threads,
                                            gmpecpp_detail::g_seed, &sr)) {
           if (sr.outcome == gmpecpp_detail::SWEEP_COMPOSITE) {
             gmpecpp_detail::state().factor = sr.factor;
@@ -3051,38 +3047,37 @@ int32_t Atkin(mpz_class N) {
           P = sr.P;
           P1 = sr.P1;
           P2 = sr.P2;
-          found = true;
+          found2 = true;
         }
       } else
-        while ((D = -n++) > -Dmax) {
+      while ((D = -n++) > -Dmax) {
 
-          if (D % 4 != 0 && D % 4 != -3 && D % 4 != 1)
-            continue;
+        if (D % 4 != 0 && D % 4 != -3 && D % 4 != 1)
+          continue;
 
-          gmpecpp_detail::SweepResult sr;
-          gmpecpp_detail::SweepOutcome o =
-              gmpecpp_detail::try_discriminant(D, Ni, rstate, root, &sr);
+        gmpecpp_detail::SweepResult sr;
+        gmpecpp_detail::SweepOutcome o =
+            gmpecpp_detail::try_discriminant(D, Ni, rstate, root, &sr);
 
-          if (o == gmpecpp_detail::SWEEP_COMPOSITE) {
-            gmpecpp_detail::state().factor = sr.factor;
-            gmpecpp_detail::log()
-                << sr.tag << " factor = " << sr.factor << "\n";
-            return 2;
-          }
-          if (o == gmpecpp_detail::SWEEP_FOUND) {
-            a = sr.a;
-            b = sr.b;
-            m = sr.m;
-            q = sr.q;
-            P = sr.P;
-            P1 = sr.P1;
-            P2 = sr.P2;
-            found = true;
-            break;
-          }
+        if (o == gmpecpp_detail::SWEEP_COMPOSITE) {
+          gmpecpp_detail::state().factor = sr.factor;
+          gmpecpp_detail::log() << sr.tag << " factor = " << sr.factor << "\n";
+          return 2;
         }
+        if (o == gmpecpp_detail::SWEEP_FOUND) {
+          a = sr.a;
+          b = sr.b;
+          m = sr.m;
+          q = sr.q;
+          P = sr.P;
+          P1 = sr.P1;
+          P2 = sr.P2;
+          found2 = true;
+          break;
+        }
+      }
 
-      if (found) {
+      if (found2) {
         if (!staticBmax)
           Bmax = BMAX;
         if (!staticDmax)
@@ -3105,8 +3100,7 @@ int32_t Atkin(mpz_class N) {
     }
     if (Bmax > 2000000000) {
       if (!Quiet) {
-        gmpecpp_detail::log()
-            << "ProvePrime: exceeded maximum factoring bounds\n";
+        gmpecpp_detail::log() << "ProvePrime: exceeded maximum factoring bounds\n";
       }
       gmpecpp_detail::state().give_up = gmpecpp_detail::GU_BOUNDS;
       return 2;
@@ -3138,6 +3132,7 @@ int32_t Atkin(mpz_class N) {
     gmpecpp_detail::log() << "P1 = (" << P1.x << ", " << P1.y << ")\n";
     gmpecpp_detail::log() << "P2 = (" << P2.x << ", " << P2.y << ")\n";
 
+
     i++;
     Ni = q;
 
@@ -3147,6 +3142,7 @@ int32_t Atkin(mpz_class N) {
 }
 
 // The name of this program.
+
 
 // Extracted from the original main(): the file scope mpf_class
 // constants are only meaningful once their precision is set and their
@@ -3197,14 +3193,11 @@ void init_constants_uncached() {
   ONEPOINTNINE.set_prec(precision);
   ONEPOINTNINE = NINETEEN / TEN;
 
-  PIf = FOUR *
-        (atanf2(ONE / TWO) +
-         atanf2(ONE /
-                THREE)); // Hutton
-                         // PIf = FOUR *
-                         // (TWELVE * atanf2(ONE/EIGHTEEN)
-                         // + EIGHT * atanf2(ONE/FIFTYSEVEN)
-                         // - FIVE * atanf2(ONE/TWOHUNDREDTHIRTYNINE));	// Gauss
+  PIf = FOUR * (atanf2(ONE / TWO) + atanf2(ONE / THREE)); // Hutton
+  // PIf = FOUR *
+  // (TWELVE * atanf2(ONE/EIGHTEEN)
+  // + EIGHT * atanf2(ONE/FIFTYSEVEN)
+  // - FIVE * atanf2(ONE/TWOHUNDREDTHIRTYNINE));	// Gauss
 
   Ef = expf2(ONE);
 
@@ -3217,8 +3210,8 @@ void init_constants_uncached() {
 
 #include <cstring>
 #include <mutex>
-#include <new>
 #include <unistd.h>
+#include <new>
 
 namespace gmpecpp_detail {
 
@@ -3252,6 +3245,10 @@ bool cuda_available();
 const char *cuda_device_name();
 bool cuda_ecm_factor(mpz_srcptr n, unsigned long b1, unsigned int curves,
                      unsigned long seed, mpz_ptr factor);
+int cuda_ecm_run(mpz_srcptr n, unsigned long b1, unsigned long b2,
+                 unsigned int curves, unsigned long seed, int (*stop)(void *),
+                 void *stop_arg, mpz_ptr factor);
+unsigned int cuda_ecm_default_curves(size_t bits);
 
 } // namespace gmpecpp_detail
 
@@ -3273,10 +3270,11 @@ struct gmpecpp_config {
   void *log_user;
 
   gmpecpp_config()
-      : precision(0), error_shift(0), seed(0), bmax(0), dmax(0), have_bmax(0),
-        have_dmax(0), hilbert(0), weber(0), one_step(0), verbosity(0),
-        backend(GMPECPP_BACKEND_CPU), cuda_curves(0), cuda_min_bits(192),
-        threads(1), sweep_threads(1), log_fn(NULL), log_user(NULL) {}
+      : precision(0), error_shift(0), seed(0), bmax(0), dmax(0),
+        have_bmax(0), have_dmax(0), hilbert(0), weber(0), one_step(0),
+        verbosity(0), backend(GMPECPP_BACKEND_CPU), cuda_curves(0),
+        cuda_min_bits(192), threads(1), sweep_threads(1),
+        log_fn(NULL), log_user(NULL) {}
 };
 
 struct gmpecpp_certificate {
@@ -3296,70 +3294,49 @@ gmpecpp_config_t *gmpecpp_config_new(void) {
 void gmpecpp_config_free(gmpecpp_config_t *c) { delete c; }
 
 void gmpecpp_config_set_precision(gmpecpp_config_t *c, unsigned long v) {
-  if (c)
-    c->precision = v;
+  if (c) c->precision = v;
 }
 void gmpecpp_config_set_error_shift(gmpecpp_config_t *c, unsigned long v) {
-  if (c)
-    c->error_shift = v;
+  if (c) c->error_shift = v;
 }
 void gmpecpp_config_set_seed(gmpecpp_config_t *c, unsigned long v) {
-  if (c)
-    c->seed = v;
+  if (c) c->seed = v;
 }
 void gmpecpp_config_set_bmax(gmpecpp_config_t *c, unsigned long v) {
-  if (c) {
-    c->bmax = v;
-    c->have_bmax = 1;
-  }
+  if (c) { c->bmax = v; c->have_bmax = 1; }
 }
 void gmpecpp_config_set_dmax(gmpecpp_config_t *c, unsigned long v) {
-  if (c) {
-    c->dmax = v;
-    c->have_dmax = 1;
-  }
+  if (c) { c->dmax = v; c->have_dmax = 1; }
 }
 void gmpecpp_config_set_hilbert(gmpecpp_config_t *c, int v) {
-  if (c)
-    c->hilbert = v ? 1 : 0;
+  if (c) c->hilbert = v ? 1 : 0;
 }
 void gmpecpp_config_set_weber(gmpecpp_config_t *c, int v) {
-  if (c)
-    c->weber = v ? 1 : 0;
+  if (c) c->weber = v ? 1 : 0;
 }
 void gmpecpp_config_set_one_step(gmpecpp_config_t *c, int v) {
-  if (c)
-    c->one_step = v ? 1 : 0;
+  if (c) c->one_step = v ? 1 : 0;
 }
 void gmpecpp_config_set_backend(gmpecpp_config_t *c, gmpecpp_backend_t b) {
-  if (c)
-    c->backend = b;
+  if (c) c->backend = b;
 }
 void gmpecpp_config_set_cuda_curves(gmpecpp_config_t *c, unsigned int n) {
-  if (c)
-    c->cuda_curves = n;
+  if (c) c->cuda_curves = n;
 }
 void gmpecpp_config_set_cuda_min_bits(gmpecpp_config_t *c, unsigned int n) {
-  if (c)
-    c->cuda_min_bits = n;
+  if (c) c->cuda_min_bits = n;
 }
 void gmpecpp_config_set_threads(gmpecpp_config_t *c, unsigned int n) {
-  if (c)
-    c->threads = n;
+  if (c) c->threads = n;
 }
 void gmpecpp_config_set_sweep_threads(gmpecpp_config_t *c, unsigned int n) {
-  if (c)
-    c->sweep_threads = n;
+  if (c) c->sweep_threads = n;
 }
 void gmpecpp_config_set_log(gmpecpp_config_t *c, gmpecpp_log_fn f, void *u) {
-  if (c) {
-    c->log_fn = f;
-    c->log_user = u;
-  }
+  if (c) { c->log_fn = f; c->log_user = u; }
 }
 void gmpecpp_config_set_verbosity(gmpecpp_config_t *c, int v) {
-  if (c)
-    c->verbosity = v;
+  if (c) c->verbosity = v;
 }
 
 } // extern "C"
@@ -3373,6 +3350,7 @@ unsigned int g_cuda_min_bits = 192;
 int g_threads = 1;
 int g_sweep_threads = 1;
 unsigned long g_seed = 0;
+
 
 // Constants are expensive at high precision (a few tenths of a second at
 // the default 10000 bits) and depend only on `precision`, so cache them.
@@ -3444,6 +3422,7 @@ void emit_preamble(unsigned long seed) {
     }
     log() << "\n";
   }
+
 }
 
 // Copies the configuration onto the prover's file scope globals and
@@ -3625,8 +3604,9 @@ gmpecpp_status_t gmpecpp_prove_mpz(const gmpecpp_config_t *cfg, mpz_srcptr n,
   return gmpecpp_detail::run(cfg, n, cert);
 }
 
-gmpecpp_status_t gmpecpp_ecm_factor(const gmpecpp_config_t *cfg, const char *n,
-                                    unsigned long b1, char **factor) {
+gmpecpp_status_t gmpecpp_ecm_factor(const gmpecpp_config_t *cfg,
+                                    const char *n, unsigned long b1,
+                                    char **factor) {
   if (factor)
     *factor = NULL;
   if (!n)
@@ -3684,6 +3664,60 @@ gmpecpp_status_t gmpecpp_ecm_factor(const gmpecpp_config_t *cfg, const char *n,
   return status;
 }
 
+gmpecpp_status_t gmpecpp_cuda_ecm(const char *n, unsigned long b1,
+                                  unsigned long b2, unsigned int curves,
+                                  unsigned long seed, int (*stop)(void *),
+                                  void *stop_arg, char **factor) {
+  if (factor)
+    *factor = NULL;
+  if (!n)
+    return GMPECPP_ERR_INVALID_INPUT;
+  mpz_t v, f;
+  mpz_init(v);
+  if (mpz_set_str(v, n, 10) != 0 || mpz_cmp_ui(v, 2) < 0) {
+    mpz_clear(v);
+    return GMPECPP_ERR_INVALID_INPUT;
+  }
+  mpz_init(f);
+  int r = gmpecpp_detail::cuda_ecm_run(v, b1, b2, curves, seed ? seed : 1,
+                                       stop, stop_arg, f);
+  gmpecpp_status_t status;
+  if (r == 1) {
+    status = GMPECPP_COMPOSITE;
+    if (factor) {
+      char *str = mpz_get_str(NULL, 10, f);
+      size_t len = strlen(str) + 1;
+      *factor = (char *)malloc(len);
+      if (*factor)
+        memcpy(*factor, str, len);
+      void (*freefunc)(void *, size_t);
+      mp_get_memory_functions(NULL, NULL, &freefunc);
+      freefunc(str, len);
+    }
+  } else if (r == 0) {
+    status = GMPECPP_PROBABLY_PRIME;
+  } else if (r == -2) {
+    status = GMPECPP_ERR_INVALID_INPUT;
+  } else {
+    status = GMPECPP_ERR_INTERNAL;
+  }
+  mpz_clear(f);
+  mpz_clear(v);
+  return status;
+}
+
+unsigned int gmpecpp_cuda_ecm_curves(const char *n) {
+  if (!n)
+    return 0;
+  mpz_t v;
+  mpz_init(v);
+  unsigned int c = 0;
+  if (mpz_set_str(v, n, 10) == 0 && mpz_cmp_ui(v, 2) >= 0)
+    c = gmpecpp_detail::cuda_ecm_default_curves(mpz_sizeinbase(v, 2));
+  mpz_clear(v);
+  return c;
+}
+
 void gmpecpp_string_free(char *s) { free(s); }
 
 void gmpecpp_certificate_free(gmpecpp_certificate_t *c) { delete c; }
@@ -3728,14 +3762,15 @@ double gmpecpp_certificate_ecm_elapsed(const gmpecpp_certificate_t *c) {
   return c ? c->ecm_elapsed : 0.0;
 }
 
-int gmpecpp_have_cuda(void) { return gmpecpp_detail::cuda_available() ? 1 : 0; }
+int gmpecpp_have_cuda(void) {
+  return gmpecpp_detail::cuda_available() ? 1 : 0;
+}
 const char *gmpecpp_cuda_device_name(void) {
   return gmpecpp_detail::cuda_device_name();
 }
 
 const char *gmpecpp_version_string(void) {
-  return "libgmpecpp "
-         "1.0.0"
+  return "libgmpecpp " "1.0.0"
 #ifdef GMPECPP_WITH_CUDA
          " (CUDA/CGBN)"
 #else
@@ -3746,22 +3781,14 @@ const char *gmpecpp_version_string(void) {
 
 const char *gmpecpp_status_string(gmpecpp_status_t s) {
   switch (s) {
-  case GMPECPP_PROVEN_PRIME:
-    return "proven prime";
-  case GMPECPP_PROBABLY_PRIME:
-    return "probably prime";
-  case GMPECPP_COMPOSITE:
-    return "composite";
-  case GMPECPP_OUT_OF_DISCRIMINANTS:
-    return "gave up: ran out of discriminants";
-  case GMPECPP_FACTORING_BOUND:
-    return "gave up: exceeded factoring bounds";
-  case GMPECPP_ERR_INVALID_INPUT:
-    return "invalid input";
-  case GMPECPP_ERR_NO_MEMORY:
-    return "out of memory";
-  case GMPECPP_ERR_INTERNAL:
-    return "internal error";
+  case GMPECPP_PROVEN_PRIME: return "proven prime";
+  case GMPECPP_PROBABLY_PRIME: return "probably prime";
+  case GMPECPP_COMPOSITE: return "composite";
+  case GMPECPP_OUT_OF_DISCRIMINANTS: return "gave up: ran out of discriminants";
+  case GMPECPP_FACTORING_BOUND: return "gave up: exceeded factoring bounds";
+  case GMPECPP_ERR_INVALID_INPUT: return "invalid input";
+  case GMPECPP_ERR_NO_MEMORY: return "out of memory";
+  case GMPECPP_ERR_INTERNAL: return "internal error";
   }
   return "unknown";
 }

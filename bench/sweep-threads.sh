@@ -1,5 +1,4 @@
 #!/bin/bash
-
 # sweep-threads -- how does the discriminant sweep scale?
 #
 # Speculative parallelism with a catch: the sweep keeps the *smallest*
@@ -8,7 +7,6 @@
 # it are doing work that gets discarded, and the ceiling is set by how
 # many discriminants the input actually needs -- an input whose first
 # discriminant works has nothing to parallelise.
-
 set -u
 BIN=${BIN:-./gmp-ecpp}
 DATA=${DATA:-bench/primes.txt}

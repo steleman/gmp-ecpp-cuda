@@ -253,7 +253,8 @@ int32_t addition_1(mpz_class n, struct point P1, struct point P2,
 
 // affine coords
 // P1 == P2
-void addition_2(mpz_class a, mpz_class n, struct point P1, struct point *P3) {
+void addition_2(mpz_class a, mpz_class n, struct point P1,
+                struct point *P3) {
   mpz_class m;
 
   // calculate m = (3x1 ^ 2 + a)(2y1) ^ -1 mod n

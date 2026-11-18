@@ -15,3 +15,7 @@ libgmpecpp.so.*
 ecm-reach
 kernel-latency
 gmpecpp-mpi
+gmpecmfft
+gmpecmfft-mpi
+libgmpecmfft.so
+libgmpecmfft.so.*

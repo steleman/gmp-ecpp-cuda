@@ -1,0 +1,103 @@
+CUDA-aware rebuild of Fedora 41's openmpi-5.0.5-2.fc41 spec.
+
+- A `cuda` build option, on by default: --with-cuda=/usr/local/cuda,
+  --with-cuda-libdir=/usr/local/cuda/lib64/stubs, and RPATH
+  /usr/local/cuda/lib64 -- the alternatives symlink, never a versioned
+  /usr/local/cuda-X.Y, so CUDA upgrades do not break the binaries.
+- QA_RPATHS=0x0002 in %install: check-rpaths calls that RPATH "invalid"
+  (it is outside the build root).
+- JAVA_HOME=/usr/lib/jvm/java: configure's own search wants a JDK
+  directory with a version suffix.
+- ROMIO's bundled MPL: Level Zero checks answered "no" through the
+  autoconf cache (its Level Zero backend does not compile against the
+  installed oneapi-level-zero-devel, and it ignores --without-ze).
+- Release 2.1.cuda (sorts after Fedora's 2), and a changelog entry.
+
+Apply in the directory holding openmpi.spec:  patch -p1 < THIS-FILE
+
+--- a/openmpi.spec
++++ b/openmpi.spec
+@@ -56,9 +56,20 @@
+ # Run autogen - needed for some patches
+ %bcond_with autogen
+ 
++# CUDA-aware build (local rebuild, not Fedora's). Built against
++# /usr/local/cuda -- the alternatives symlink -- and never a versioned
++# /usr/local/cuda-X.Y, in paths and in the RPATH, so that upgrading CUDA
++# does not break these binaries. libcuda itself (the driver API, which
++# is all Open MPI's CUDA support links) comes from the NVIDIA driver in
++# /usr/lib64; the link step uses CUDA's stub, which must never be in an
++# RPATH.
++%bcond_without cuda
++%global cuda_home /usr/local/cuda
++
+ Name:           openmpi%{?_cc_name_suffix}
+ Version:        5.0.5
+-Release:        2%{?dist}
++# 2.1.cuda sorts after Fedora's 2, so this installs as an upgrade.
++Release:        2.1.cuda%{?dist}
+ Summary:        Open Message Passing Interface
+ License:        BSD and MIT and Romio
+ URL:            http://www.open-mpi.org/
+@@ -234,6 +245,22 @@
+ 
+ %build
+ %set_build_flags
++%if %{with cuda}
++export LDFLAGS="$LDFLAGS -Wl,-rpath,%{cuda_home}/lib64"
++%endif
++%if %{with java}
++# configure looks for /usr/lib/jvm/java-*-openjdk-*/include/jni.h unless
++# JAVA_HOME is set, and this host's JDK directory has no version suffix;
++# the alternatives link /usr/lib/jvm/java is stable.
++export JAVA_HOME=%{_jvmdir}/java
++%endif
++# --with-io-romio-flags (below): ROMIO's bundled copy of MPICH's MPL
++# builds an Intel Level Zero backend whenever it finds
++# level_zero/ze_api.h, and that backend predates the Level Zero API of
++# the oneapi-level-zero-devel installed here (it does not compile). MPL
++# ignores --without-ze, so its two checks are answered "no" through the
++# autoconf cache, as Open MPI itself does for cuMemGetAddressRange. Open
++# MPI's own CUDA support does not involve MPL.
+ ./configure --prefix=%{_libdir}/%{name} \
+ 	--mandir=%{_mandir}/%{namearch} \
+ 	--includedir=%{_includedir}/%{namearch} \
+@@ -255,6 +282,11 @@
+ 	--enable-memchecker \
+ %endif
+ 	--with-hwloc=/usr \
++%if %{with cuda}
++	--with-cuda=%{cuda_home} \
++	--with-cuda-libdir=%{cuda_home}/lib64/stubs \
++%endif
++	--with-io-romio-flags="ac_cv_header_level_zero_ze_api_h=no ac_cv_lib_ze_loader_zeInit=no" \
+ %if !0%{?el7}
+ 	--with-libevent=external \
+ %if %{with pmix}
+@@ -265,6 +297,13 @@
+ %make_build V=1
+ 
+ %install
++%if %{with cuda}
++# check-rpaths (run at the end of %%install) puts /usr/local/cuda/lib64
++# in its "invalid" class 0x0002 -- the path is outside the build root.
++# It is deliberate: the RUNPATH that keeps CUDA's libraries findable
++# through the unversioned symlink. Allow that class only.
++export QA_RPATHS=$(( 0x0002 ))
++%endif
+ %make_install
+ find %{buildroot}%{_libdir}/%{name}/lib -name \*.la | xargs rm
+ find %{buildroot}%{_mandir}/%{namearch} -type f | xargs gzip -9
+@@ -444,6 +483,12 @@
+ 
+ 
+ %changelog
++* Mon Nov 16 2026 Stefan Teleman <localhost> - 5.0.5-2.1.cuda
++- Local rebuild with CUDA support (--with-cuda=/usr/local/cuda,
++  --with-cuda-libdir=/usr/local/cuda/lib64/stubs); RPATH
++  /usr/local/cuda/lib64, the alternatives symlink, never a versioned
++  CUDA directory
++
+ * Wed Jul 31 2024 Sandro Mani <manisandro@gmail.com> - 5.0.5-2
+ - Rebuild with rpm-mpi-hooks-8-10 to fix provides (#2302033)
+ 

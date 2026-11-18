@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-
 """profile-phases -- where does an ECPP proof actually spend its time?
 
 Injects an exclusive-time profiler into a throwaway copy of the prover,

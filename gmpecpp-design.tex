@@ -16,9 +16,9 @@
 \title{\textbf{libgmpecpp}: An Elliptic Curve Primality Prover as a
   Reusable Library, with a CGBN/CUDA Backend for the Factoring Stage}
 
-\author{Stefan Teleman \code{<stefan.teleman@gmail.com>}}
+\author{Stefan Teleman \code{<stefan.teleman@gmail.com>}\\[4pt]Claude Opus 5.5 (Anthropic)}
 
-\date{September 3, 2026}
+\date{September 3, 2026; revised November 17, 2026}
 
 \begin{document}
 \maketitle
@@ -44,7 +44,7 @@ inversion exhibits; and the return of the primality certificate as
 structured data rather than as printed text, which additionally permits
 the library to distinguish outcomes that the historical command line
 interface conflates under a single exit status. We present a C API,
-stable across C and C++, exporting thirty-two symbols. The original
+stable across C and C++, now exporting thirty-six symbols. The original
 command line tool is reimplemented as a client of this API and is shown
 to be byte-identical to the historical program across 156 runs spanning
 thirteen flag combinations, four inputs and three seeds, comparing
@@ -76,21 +76,21 @@ parametrisation, in $XZ$ coordinates so that the inner loop requires no
 modular inversion, with one CGBN instance per curve and Montgomery
 representation throughout. We show the resulting kernel to be latency
 bound rather than throughput bound: sixteen-fold increases in
-concurrent curve count cost only $1.4\times$ in wall time, since the
+concurrent curve count cost only $1.4\times$ in wall time for stage one, since the
 binding constraint is the serial chain of prime powers each curve must
 traverse. Consequently curves are nearly free, which is precisely the
 shape that ECM rewards.
 
-Measured on an RTX 4080 Laptop, whole-proof speedups are $1.00$--$1.02\times$
-below sixty decimal digits, where the host already splits cofactors in
-milliseconds, rising to $2.45\times$ at ninety digits, $3.22\times$ at
-one hundred and ten, and $28.8\times$ at one hundred and forty. Across a
-thirty-six-proof sweep from ninety to one hundred and eighty digits the
-GPU backend is faster in twenty-five runs, with median speedup
-$2.41\times$ and aggregate $2.67\times$. We argue that the aggregate
+Measured on an RTX PRO 4500 Blackwell with stage two on the GPU, whole-proof
+speedups are $0.99$--$1.02\times$ below sixty decimal digits, where the host
+already splits cofactors in milliseconds, rising to $2.53\times$ at ninety
+digits, $3.27\times$ at one hundred and ten, and $25.6\times$ at one hundred
+and forty. Across a thirty-six-proof sweep from ninety to one hundred and
+eighty digits the GPU backend is faster in twenty-seven runs, with median
+speedup $2.37\times$ and aggregate $3.48\times$. We argue that the aggregate
 figure understates the effect, which is better characterised as variance
-reduction: host runtimes span $0.65$ to $51.5$ seconds while
-GPU-assisted runtimes span $0.66$ to $16.4$ seconds. The mechanism is that a discriminant the host
+reduction: host runtimes span $0.83$ to $67.3$ seconds while
+GPU-assisted runtimes span $0.91$ to $19.7$ seconds. The mechanism is that a discriminant the host
 abandons for want of a factorisation is one the GPU can use, so
 GPU-assisted proofs are frequently \emph{shorter} as well as faster.
 
@@ -125,6 +125,18 @@ embarrassingly parallel, which suits MPI; we show that neither tool
 suffices alone, since MPI plateaus at $2.63\times$ on a batch bounded by
 its slowest single proof while threads reduce that proof, the hybrid
 reaching $11.0\times$.
+
+A November 2026 revision adds a second GPU entry point,
+\code{gmpecpp\_cuda\_ecm()}, for programs that factor rather than prove: no host attempt and no
+global lock, one full wave of curves, short resumable launches that a caller can stop and that
+remove any cap on $B_1$, and a stage two on the GPU (prime continuation with normalized baby
+points, two modular multiplications per prime), which raises the per-curve success rate about
+tenfold at modest cost. Used beside GMP-ECM on the host, one GPU then finds about nine times as
+many 30-digit factors per second as thirty-one CPU threads. A companion library,
+\code{libgmpecmfft}, carries ECM past CGBN's $16352$-bit limit with cuFFT-based Montgomery
+arithmetic and Montgomery's FFT continuation for stage two, validated against CGBN, GMP and
+GMP-ECM on identical curves; \code{gmpecmfft-mpi} shares one number's curves among the GPUs of
+a cluster.
 
 The complete system is licensed GPL-3.0-or-later, comprises a shared
 library, a compatible command line tool, an MPI driver, benchmark
@@ -258,6 +270,18 @@ preserve them when code is moved.
   \item \textbf{Montgomery modular multiplication.} Montgomery
     \cite{montgomery1985}, used throughout the kernel via CGBN's
     Montgomery primitives.
+  \item \textbf{Stage two by prime continuation.} Montgomery's baby-step
+    giant-step continuation \cite{montgomery1987}: primes $q = mD \pm j$ are
+    detected by comparing $x$-coordinates of $[mD]Q$ and $[j]Q$, which needs no
+    inversion in the loop.
+  \item \textbf{FFT continuation.} Montgomery's polynomial stage two
+    \cite{montgomery1992}, in the cuFFT backend: $\prod_{m,j} (X_m - x_j Z_m)$
+    by polynomial products modulo $\prod_j (X - x_j)$ and multipoint
+    evaluation by Bernstein's scaled remainder tree \cite{bernstein2004},
+    with Newton reciprocals and Kronecker substitution as in von zur
+    Gathen and Gerhard \cite{vzgathen2013}.
+  \item \textbf{cuFFT.} NVIDIA's FFT library \cite{cufft}, for the
+    double-precision convolutions behind every product above $16352$ bits.
   \item \textbf{CGBN.} The Cooperative Groups Big Numbers library of
     NVIDIA Labs \cite{cgbn}, which supplies fixed-width multiple-precision
     integer arithmetic distributed across cooperating threads.
@@ -326,8 +350,10 @@ input after the banner has appeared, as the original did.
 
 \subsection{Interface}
 
-The public interface comprises thirty-two exported symbols, all others
-being hidden. The header compiles as both C and C++, and a variant
+The public interface comprises thirty-six exported symbols, all others
+being hidden (thirty-two in the first release; the thread settings of
+Section~\ref{sec:parallel} and the standalone GPU entry point of
+Section~\ref{sec:cudaecm} added four). The header compiles as both C and C++, and a variant
 accepting a GMP integer directly is declared when \code{<gmp.h>} precedes
 it.
 
@@ -359,12 +385,18 @@ inversion occurs in the inner loop. A nontrivial $\gcd$ of the final $Z$
 coordinate with $n$ is a factor.
 
 Instance width is fixed at compile time; the backend selects the
-narrowest of $512$, $1024$ and $2048$ bits that accommodates the input.
+narrowest of $512$, $1024$, $2048$, $4096$, $8192$ and $16384$ bits that accommodates the input
+(one $32$-bit limb is left spare, so the limits are $480$, $992$, $2016$, $4064$, $8160$ and
+$16352$ bits). $16384$ is the practical ceiling: a CGBN instance spans at most one warp, and at
+that width the hot kernels already use $236$--$248$ of the $255$ registers a thread may have.
 
 \subsection{The kernel is latency bound}
 
-Table~\ref{tab:kernel} reports kernel cost as a function of the
-stage-one bound $B_1$ and the number of concurrent curves.
+Measured with stage one only (RTX 4080), the GPU's marginal cost at $B_1 = 10^4$
+was $0.227$\,s for $256$ curves and $0.354$\,s for $4096$, and at $5\cdot10^4$
+$1.119$\,s and $1.802$\,s: sixteen-fold increases in curve count cost $1.4\times$ in
+wall time. Table~\ref{tab:kernel} repeats the measurement with the prover's current GPU
+path, which adds stage two when stage one fails.
 
 \begin{table}[t]
 \centering
@@ -372,20 +404,22 @@ stage-one bound $B_1$ and the number of concurrent curves.
 \toprule
 $B_1$ & 256 curves & 1024 curves & 4096 curves \\
 \midrule
-$10^2$ & 0.023\,s & 0.026\,s & 0.035\,s \\
-$10^3$ & 0.022\,s & 0.024\,s & 0.033\,s \\
-$10^4$ & 0.227\,s & 0.250\,s & 0.354\,s \\
-$5\times10^4$ & 1.119\,s & 1.257\,s & 1.802\,s \\
+$10^2$ & 0.057\,s & 0.057\,s & 0.069\,s \\
+$10^3$ & 0.056\,s & 0.057\,s & 0.069\,s \\
+$10^4$ & 0.483\,s & 0.489\,s & 0.337\,s \\
+$5\times10^4$ & 1.233\,s & 1.209\,s & 1.504\,s \\
 \bottomrule
 \end{tabular}
-\caption{GPU kernel cost. Sixteen-fold increases in curve count cost
-  $1.4\times$ in wall time; cost tracks $B_1$ instead.}
+\caption{GPU marginal cost (a CUDA run minus a host-only run of the same work; 46-digit
+  modulus with a 20-digit factor; RTX PRO 4500, stage one and two). Cost tracks $B_1$;
+  at $B_1 = 10^4$ more curves were \emph{cheaper}, because stage one then more often found
+  the factor and stage two was skipped.}
 \label{tab:kernel}
 \end{table}
 
 Cost tracks $B_1$, which determines the length of the serial chain each
 curve must traverse, and is nearly independent of curve count until the
-device saturates. Curves are therefore almost free. This is the shape ECM
+device saturates, at about one wave of curves (Section~\ref{sec:cudaecm}). Curves are therefore almost free. This is the shape ECM
 rewards, and it is the reason the backend defaults to thousands of
 concurrent curves against the host implementation's twenty per bound.
 
@@ -401,6 +435,241 @@ GPU only when the host has failed \emph{and} the cofactor exceeds a
 configurable width, $192$ bits by default. Under this policy enabling the
 backend is neutral where it cannot help and substantially profitable
 where it can.
+
+\subsection{A standalone, resumable GPU ECM}
+\label{sec:cudaecm}
+
+The dispatch policy above suits a prover, whose factoring calls are meant to fail fast. A program
+that \emph{factors} wants the opposite: the GPU as an engine of its own, run beside GMP-ECM on the
+host. The first such client, the trial-division factorizers of the \code{primefactors} project,
+gained almost nothing from \code{gmpecpp\_ecm\_factor()}. Profiling showed why: each call
+spent $1.36$\,s of $2.04$\,s at $B_1 = 10^4$, and $6.99$\,s of $8.92$\,s at $5\cdot10^4$, in the
+host attempt rather than the kernel ($0.34$\,s and $1.52$\,s); $4096$ curves filled the device only
+part way; and stage one alone, with $B_1 \le 10^5$, made each GPU curve 6--20$\times$ less likely
+to succeed than a GMP-ECM curve with stage two.
+
+\code{gmpecpp\_cuda\_ecm()} --- taking $n$, $B_1$, $B_2$, a curve count, a seed and a stop
+callback --- addresses each point:
+\begin{itemize}
+  \item \textbf{GPU only.} No host attempt and no global lock: concurrent calls, on one device or
+    several, are safe. The call runs on the caller's current device.
+  \item \textbf{One wave of curves.} \code{curves = 0} asks the occupancy API how many curves the
+    device runs at once ($11\,808$ at $512$ bits, $5\,904$ at $1024$, $2\,952$ at $2048$, $1\,968$ at $4096$, $984$ at $8192$, $656$ at $16384$ on an
+    RTX PRO 4500 Blackwell). Half a wave finds $21\%$ less per second; two waves find the same at
+    twice the time per call.
+  \item \textbf{Resumable launches.} $X$, $Z$ and $a_{24}$ of every curve stay in device memory,
+    and stage one runs as launches of about $0.25$\,s, the slice of prime powers adapted from the
+    previous launch's time. A \code{stop} callback is polled between launches, and $B_1$ is no
+    longer bounded by how long one launch may take.
+\end{itemize}
+A call now costs $0.65$\,s at $B_1 = 10^4$ and $2.6$\,s at $5\cdot10^4$.
+
+\subsection{Stage two on the GPU}
+
+Let $Q$ be a curve's point after stage one and $D = 210$. Every prime $q \in (B_1, B_2]$ is
+$mD \pm j$ for one $m$ and one of the $24$ odd $j < D/2$ coprime to $D$, and $[q]Q = O \pmod p$
+exactly when $x([mD]Q) \equiv x([j]Q) \pmod p$, since $x$ does not see the sign of $j$. Each
+curve stores its $24$ baby points $[j]Q$, computed by differential additions from $[1]Q$ and
+$[2]Q$ and \emph{normalized} once to $x_j = X_j/Z_j$ (one inversion each; a failed inversion
+exposes $\gcd(Z_j, n)$ as a factor). The giant points $[mD]Q$ advance by one differential
+addition each, $[(m+1)D] = [mD] + [D]$ with difference $[(m-1)D]$, and for every pair $(m, j)$
+that covers a prime the accumulator is multiplied by $X_m - x_j Z_m$; $\gcd(\mathit{acc}, n)$
+ends the stage. That is two modular multiplications per prime, against about sixteen per unit
+of $B_1$ in stage one. Which pairs to take does not depend on the curve, so the host builds them
+once, as one $24$-bit mask per $m$ from a segmented sieve, and every curve reads the same mask.
+
+Before the normalization each pair cost three multiplications ($X_m Z_j - X_j Z_m$); the
+normalized form left every hit unchanged on identical curves and made stage two $1.4\times$
+faster. Correctness was checked statistically, since a single run cannot tell a working stage
+two from a lucky stage one: on a 20-digit factor at $B_1 = 10^4$ the per-curve success rate rose
+from $0.00068$ to $0.0099$ with $B_2 = 50\,B_1$, against $0.0129$ for GMP-ECM with the same $B_2$.
+An environment variable, \code{GMPECPP\_CUDA\_ECM\_STATS}, reports the number of successful curves
+per stage, which is how these rates were measured.
+
+\begin{table}[t]
+\centering
+\begin{tabular}{lrrrr}
+\toprule
+ & $25\,B_1$ & $50\,B_1$ & $100\,B_1$ & $200\,B_1$ \\
+\midrule
+20 digits, $B_1 = 10^4$ (three mults/prime) & 108 & 120 & \textbf{132} & 109 \\
+30 digits, $B_1 = 2.5\cdot10^5$ (two mults/prime) & --- & \textbf{0.47} & 0.41 & 0.42 \\
+\bottomrule
+\end{tabular}
+\caption{Factors found per second, one wave of curves, by the stage-two bound $B_2$. Stage two
+  alone raised the 20-digit rate from 12 to 132.}
+\label{tab:stage2}
+\end{table}
+
+Table~\ref{tab:stage2} chooses $B_2$: $100\,B_1$ at $B_1 = 10^4$ and $50\,B_1$ from $5\cdot10^4$ up.
+The best $B_1$ for each factor size is GMP-ECM's own ($5\cdot10^4$ for 25 digits, $2.5\cdot10^5$ for
+30 at $1.7$\,s per find, $10^6$ for 35 at $17$\,s per find), and there one GPU finds about
+$9\times$ as many 30-digit factors per second as GMP-ECM on thirty-one host threads with its default
+$B_2$, and 4--9$\times$ as many 35-digit ones. Run concurrently with GMP-ECM in the
+\code{primefactors} factorizers, eight 400-bit inputs with 18--35-digit factors took $171$\,s
+against $202$--$329$\,s on the host alone, the GPU winning most of the hardest.
+
+The prover itself now uses the same kernels when it escalates to the GPU: stage one and stage
+two, $B_2$ by the rule above, $B_1$ still clamped to $[10^3, 10^5]$ and $4096$ curves by default,
+the host attempt still first. Over the thirty-six CUDA proofs of the sweep in
+Section~\ref{sec:results} (90 to 180 digits, two seeds), the total fell from $145.9$\,s to
+$117.9$\,s, every proof completed and every certificate verified on both backends. The gain is
+where the GPU is reached --- 120 digits $4.8 \to 2.9$\,s, 150 digits $9.9 \to 3.2$\,s --- and
+small inputs are unchanged. A full wave of curves gave $121.5$\,s, no better than $4096$.
+
+\section{The cuFFT backend: ECM beyond the CGBN widths}
+\label{sec:fft}
+
+CGBN stops at $16384$-bit instances ($n$ up to $16352$ bits), and schoolbook multiplication
+inside one warp would be the wrong algorithm well before any larger width could be compiled. A
+second library, \code{libgmpecmfft}, with its own command line tool \code{gmpecmfft}, factors
+numbers of any size. Its entry point \code{gmpecmfft\_ecm()} takes the same arguments as
+\code{gmpecpp\_cuda\_ecm()} and simply calls it up to $16352$ bits; above that, every modular
+multiplication is a floating-point convolution computed with NVIDIA's cuFFT \cite{cufft}. Both
+paths draw $\sigma = 6 + \mathrm{random}(2^{30})$ from the seed in the same way, so a given seed
+builds the same Suyama curves on either path, and the same curves as GMP-ECM's
+\code{-sigma 0:}$\sigma$. That correspondence is the basis of every test below. The library links
+\code{libcufft} rather than \code{libcufftw}: the FFTW-compatible interface takes host arrays and
+would copy every operand across the bus on every call.
+
+\subsection{Modular arithmetic by convolution}
+
+A residue is a signed integer held as $L$ \emph{balanced} digits, each in
+$[-2^{b-1}, 2^{b-1})$, in 32-bit integers, and a \emph{slot} holds one
+residue for each of $C$ curves. All curves walk the same scalar, so every operation is on whole
+slots and the curves move in lockstep, exactly as the CGBN threads do. A product of two slots is
+a batched real-to-complex transform of length $N = 2L$, a pointwise product and an inverse
+transform; each coefficient is then rounded to an integer and carries are propagated. Balanced
+digits bound a convolution coefficient by $L\,2^{2b-2}$, a quarter of what unsigned digits
+allow, so the digit size is the largest $b$ with $2b + \log_2 L \le 46$, which keeps every exact
+coefficient below $2^{44}$, well inside the $53$-bit double mantissa: one bit per digit more than
+unsigned digits, and $L$ correspondingly shorter. The rounding error is not assumed small but
+measured on every product; the worst seen across the test sizes is about $0.0005$ (lower than
+with unsigned digits, despite their larger size, since balanced sums typically stay far below
+their bound), and a run whose error exceeds $0.25$ stops with a precision error rather than
+continuing on arithmetic it cannot trust.
+
+$L$ must be even and $7$-smooth (for the reason below), but is not simply rounded up to the
+next such number: cuFFT's speed depends on a length's factorization more than on its size. At
+$20\,000$ bits, stage one ran $15\%$ faster with $L = 1280 = 2^8 \cdot 5$ than with the
+shorter $L = 1200 = 2^4 \cdot 3 \cdot 5^2$, and the best length differed with the number of
+curves. So the library times the candidate lengths up to a quarter beyond the minimum on the
+device itself when it sets up, and keeps the fastest; a larger $L$ only makes $R$ larger.
+
+Reduction is Montgomery's \cite{montgomery1985}, with $R = 2^{bL} > 32n$. Bounds are on
+absolute values: the reduction's multiplier $m$ is balanced, $|m| \le R/2$, so inputs below $4n$
+give outputs below $n$ without any final subtraction, and an addition is $a + b$ and a
+subtraction $a - b$, neither needing a comparison or an offset. Residues are never reduced to
+$[0, n)$; ECM only ever asks for $\gcd(Z, n)$, which does not care. Carry
+propagation runs one thread block per number, each thread rippling a chunk and chunk carries
+passing upward until none remain.
+
+Of REDC's two products, $m = (T \bmod R)\,n' \bmod R$ and $mn$, only the high half of the
+second is used, and it can be had at half length, the device GMP's own \code{mpn\_redc\_n}
+uses. Write $T = T_{\mathrm{hi}}R + T_{\mathrm{lo}}$. Since $mn \equiv -T_{\mathrm{lo}}
+\pmod R$, and $R \equiv 1 \pmod{R - 1}$,
+\[
+\frac{T + mn}{R} \equiv T_{\mathrm{lo}} + T_{\mathrm{hi}} + (mn \bmod (R - 1))
+\pmod{R - 1},
+\]
+the carry between the halves cancelling; and as the result is below $2n < R - 1$, that residue
+is the result itself. $mn \bmod (R - 1)$ is a cyclic convolution of length $L$ rather than a
+linear one of length $2L$, and the sum is normalized with the carry out of the top digit wrapped
+around to the bottom. Every multiplication pays one REDC, so this shortens stage one and stage
+two alike. The full-length reduction's exactness check, a low half that must come out zero, has
+no counterpart here; instead the digits above $2n$'s length must be zero, which a wrong $m$
+violates.
+
+Operands are either slots or \emph{stored transforms}. Within one batched call, each distinct
+slot is transformed once, however many products use it; values that never change --- the base
+point and $a_{24}$ in stage one, the baby points in stage two --- are transformed once for the
+whole run. A ladder step is three rounds of $4$, $4$ and $3$ multiplications, and its first
+round needs only four forward transforms for six operands. Each step, for either bit value, is
+captured once as a CUDA graph and replayed, which removes launch overhead from a loop of tens of
+thousands of steps. Stage one is one Montgomery ladder over $k = \prod_{p^e \le B_1} p^e$, which
+reaches the same point as CGBN's ladder per prime power.
+
+\subsection{Two stage twos}
+
+The \emph{per-prime} stage two is the CGBN algorithm of the previous section transcribed: $D =
+210$, the host's prime masks, baby points normalized to $x_j$ (a batch inversion: the products
+of the $Z_j$ up a product tree on the GPU, one GMP inversion per curve at the root, and back
+down, a child's inverse being its parent's times its sibling's product), and
+$X_m - x_j Z_m$ per prime. It visits exactly the pairs CGBN visits, so hit counts compare
+exactly.
+
+The \emph{polynomial} stage two is Montgomery's FFT continuation \cite{montgomery1992}, the
+method GMP-ECM uses. With $D = 2310$ and the $k = \varphi(D)/2 = 240$ babies $x_j$, form
+\[
+F(X) = \prod_j (X - x_j), \qquad
+G_i(X) = \prod_{m \in \text{block } i} (Z_m X - X_m),
+\]
+the giants taken $k$ at a time. Accumulating $H \leftarrow H\,G_i \bmod F$ over the blocks and
+finally evaluating $\prod_j H(x_j)$ yields the product of $X_m - x_j Z_m$ over \emph{every} pair,
+that is over every number coprime to $D$ in range, a superset of the primes. The work per block
+is a product tree for $G_i$ and one multiplication and remainder modulo $F$, so the cost per
+prime falls as $k$ grows. The final evaluation is Bernstein's \emph{scaled} remainder tree
+\cite{bernstein2004} over $F$'s product tree: a node $P$ carries the first $\deg P$
+coefficients of $(H \bmod P)/P$ as a series in $1/X$, a child $L$ of $P = LR$ obtains its own
+as a middle product of its parent's with $R$, and at a leaf $X - x_j$ the single coefficient is
+$H(x_j)$. Only the root needs a reciprocal, $1/\mathrm{rev}(F)$, which the blocks already use
+(Newton iteration \cite{vzgathen2013}); a plain remainder tree would need one per node and
+about four times the reductions. Larger choices ($D =
+30030$, $k = 2880$) and a smaller one ($D = 210$, $k = 24$) are available. The polynomial form is
+used when $D \le B_1/2$ --- keeping the first giant past $[D]Q$, since a differential addition
+with difference $O$ is degenerate --- and $B_2 - B_1 \ge Dk/2$; otherwise the per-prime form
+runs. The last block is filled rather than truncated, which costs nothing and makes the
+effective $B_2$ slightly larger than requested.
+
+Polynomial products use Kronecker substitution: each curve's coefficients are packed $2L$ digits
+apart into one long integer, multiplied by a single large transform, and every coefficient of
+the product is read back as a $2L$-digit value and reduced by the same REDC as a scalar product.
+A coefficient of a product of degree-$k$ polynomials sums up to $k + 1$ terms, so this stage
+runs on its own instance of the arithmetic with smaller digits ($2b + \log_2 L + \lceil\log_2(k+1)\rceil \le
+46$) and a larger $R > 32(k+1)n$; stage one's instance is freed first, since each sizes its
+buffers from free device memory, and the stage-one point moves between the two Montgomery forms
+through the host. Remainders $A - FQ$ stay below $3n$ and are only ever used as product inputs,
+so coefficient bounds do not grow down a tree. In a block's
+$H G_i \bmod F$ the product $HG_i$ is instead kept exact: only its top $k$ coefficients are
+reduced, to form the quotient $Q$, and each low coefficient is reduced once as the difference
+of the exact $HG_i$ and $FQ$, which $R > 32(k+1)n$ accommodates --- three reductions per
+coefficient of $F$'s degree where
+the general remainder takes four. Reversal and truncation of polynomials only reorder slot
+pointers.
+
+Memory per curve grows with $k$: at $D = 30030$ and $20\,000$ bits a curve needs about a
+gigabyte, and a $32$\,GB device holds sixteen. The stage therefore runs on \emph{groups} of curves,
+one after another, each with its own instance of the arithmetic: the largest $D$ that fits for
+some group size, the group as large as fits. Since even one curve's Kronecker transforms are
+large, the cost per curve hardly depends on the group size, and a large $D$ in small groups
+beats a small $D$ in one.
+
+\subsection{Validation}
+
+Nothing in this backend is checked by comparing timings. \code{make check-fft} establishes,
+in a few minutes:
+\begin{itemize}
+  \item \textbf{Arithmetic against GMP.} Rounds of products, squares, sums and differences on
+    random residues mod $n$, and, up to $10^5$ bits, polynomial products, product and remainder
+    trees, Newton inverses and remainders: no wrong result from $200$ to $10^6$ bits. A
+    deliberately wrong expectation is reported as $528$ errors, so the check can fail.
+  \item \textbf{Against CGBN.} On a 2000-bit input, $256$ curves, $B_1 = 10^4$, $B_2 = 10^5$
+    (the per-prime stage two at that $B_2$), the FFT path finds a factor on exactly the same
+    number of curves as CGBN in stage one and in stage two.
+  \item \textbf{The polynomial stage two against a host replay.} With
+    \code{GMPECMFFT\_S2\_CHECK=1} two curves' polynomial stage two is recomputed with GMP ---
+    the same ladders, chains and formulas, hence the same projective coordinates --- and the
+    product over all pairs must agree exactly, for $D = 2310$ and for $D = 210$ forced.
+  \item \textbf{Curve groups.} Stage two run in groups of seven curves finds a factor on
+    exactly the same curves as in one group of $128$.
+  \item \textbf{Against GMP-ECM.} On a 20\,000-bit input, $256$ curves with the same
+    $\sigma$ and $B_1 = 5000$, stage one succeeds on the same number of curves under both
+    programs.
+\end{itemize}
+
+No committed harness measures this backend's speed, so no figures are given here. Profiles on
+the RTX PRO 4500 show cuFFT's double-precision kernels dominating; that card's FP64 rate is the
+bound, and the backend is meant for devices with a full-rate FP64 unit.
 
 \section{Precision as the dominant parameter}
 
@@ -606,6 +875,64 @@ its slowest single proof, and no number of ranks divides one proof.
 Threads do, because they operate inside it, so the hybrid reaches
 $11.0\times$ where either tool alone stalls.
 
+\subsection{One number's curves across GPUs}
+\label{sec:fftmpi}
+
+The factorizer of Section~\ref{sec:fft} offers a different axis to distribute. Its ECM curves
+are independent trials, and the first to find a factor ends the search, so a cluster's GPUs
+can share one number's curves while almost nothing crosses the network: the number, the
+bounds, and which curves to run. That makes curves, not the arithmetic of a single curve, the
+unit to distribute. Splitting one curve's transforms across nodes would make every
+multiplication wait on the network, and gain nothing in capacity, since even at $10^6$ bits a
+curve's values occupy a few hundred kilobytes each. For the same reason there is no bulk data
+for a GPU collective library such as NCCL to move, and the tool is written against MPI alone.
+
+\code{gmpecmfft-mpi} gives rank $0$ to a coordinator that uses no GPU; every other rank is a
+worker on one GPU, chosen by its index among the workers on its node. A batch is one call of
+\code{gmpecmfft\_ecm()} on a worker's GPU, by default one wave of curves. As in the prover's
+batch mode, work is handed out on request rather than divided in advance: a worker's result
+is also its request for the next batch, so no GPU waits on another. Batch $i$ draws its curves
+from seed $S + i$. The batches are therefore distinct, and any one of them, in particular the
+one that found a factor, is reproduced exactly by a single-GPU run with that seed.
+
+Stopping has to be prompt, since a batch at large bounds runs for minutes. When a factor
+turns up, after a requested number of batches, or on an interrupt, the coordinator sends every
+worker a single stop message. A busy worker notices it through the library's stop callback,
+which the library polls about four times a second and which here probes for that message
+without consuming it. The worker abandons its batch, reports once more, and then receives the
+stop. Each worker thus gets exactly one stop and sends exactly one final report, which leaves
+no message unmatched when the job ends. A worker that cannot run, or whose batch fails, is
+retired and its batch given to another; the run fails only if every worker does.
+
+The expected time to a factor falls in proportion to the number of GPUs only while the cluster
+needs more than one batch per GPU to run the expected number of curves for that factor's size.
+Beyond that point more GPUs no longer help, since a batch cannot finish faster than one curve
+does. The GPUs should also be of one kind. Batches are of equal size, so with a mix, the
+faster GPUs finish their share and then sit idle at the end while the slower ones complete
+theirs.
+
+The tool has been checked with two workers sharing one GPU, not yet across nodes. The factor
+came from exactly the batch that single-GPU runs with the same seeds predict, both on the CGBN
+path at $2\,000$ bits (a test \code{make check-fft} now runs) and on the FFT path at
+$20\,000$ bits. An interrupt delivered to the coordinator alone stopped workers that were never
+signalled in the middle of their batches. No multi-GPU timings are reported, since none has been
+measured.
+
+The same batches can also be run from a Slurm job array, by \code{tools/gmpecmfft-slurm}, with
+no MPI and no coordinator. Each array task holds one GPU, and task $t$ of $T$ runs batches $t$,
+$t + T$, $t + 2T$, \ldots, each batch exactly as the MPI tool would run it. The only shared state
+is a run directory on a filesystem every node sees. The first task to find a factor claims it by
+creating a directory there, which is atomic, records the factor, leaves a stop file, and cancels
+the rest of the array. Running tasks then stop on the scheduler's termination signal; where
+cancelling is not permitted, they stop within a quarter second of the stop file appearing,
+which the single-GPU tool now polls on request. This needs nothing but the scheduler and a
+shared filesystem, and tasks can start, finish and be requeued independently. The price is that
+the division of work is fixed in advance: a task on a slower GPU still has its full share of
+batches to run, so the requirement of one kind of GPU is stricter here than with the
+coordinator's on-demand dispatch. The scheduler itself was not available on the development
+machine, so the array tasks were checked by running two of them by hand: the factor came from the
+predicted batch, and the other task stopped in the middle of its batch through the stop file.
+
 \subsection{Two defects, and what found them}
 
 Both are recorded because each was invisible to the obvious test.
@@ -632,6 +959,159 @@ reproduce the historical program byte for byte. Above one they alter
 which factor is discovered, so certificates differ legitimately and are
 checked with the verifier of Section~\ref{sec:verify} rather than
 compared.
+
+\section{GMP or CGBN: a measured comparison}
+\label{sec:gmpcgbn}
+
+A natural question, once part of the arithmetic runs on the GPU, is whether the rest should
+follow: could CGBN take over every place where the host uses GMP, in the prover and in the
+factorizer? This section answers it with measurements. All of them were taken on the
+development machine, an Intel Core i9-13900K (8 performance cores with two threads each and 16
+efficiency cores, 32 hardware threads) with the RTX PRO 4500, CUDA 13.2, GMP 6.3.0 and Open
+MPI 5.0.5, and every table comes from a committed harness (\code{make bench-cgbn-latency},
+\code{bench-gmp-profile}, \code{bench-mpi-cgbn}).
+
+\subsection{The cost of one operation}
+
+Table~\ref{tab:cgbnlat} compares one GMP operation with CGBN in two ways: as a drop-in
+replacement for that single call (copy the operands in, launch one instance, synchronize, copy
+the result out), and as one of 4096 independent instances in a single launch. Every CGBN result
+was checked against GMP.
+
+\begin{table}[t]
+\centering
+\begin{tabular}{lrrrr}
+\toprule
+Operation & GMP & CGBN, one & CGBN, 4096 at once & \\
+\midrule
+$a^e \bmod n$, 512 bits  & 49\,$\mu$s   & 1439\,$\mu$s ($29\times$ slower) & 0.83\,$\mu$s & ($59\times$ faster) \\
+$a^e \bmod n$, 1024 bits & 321\,$\mu$s  & 4774\,$\mu$s ($15\times$ slower) & 3.14\,$\mu$s & ($102\times$ faster) \\
+$a^e \bmod n$, 2048 bits & 2157\,$\mu$s & 9210\,$\mu$s ($4.3\times$ slower) & 17.4\,$\mu$s & ($124\times$ faster) \\
+$ab \bmod n$, 512 bits   & 0.15\,$\mu$s & 26.2\,$\mu$s ($172\times$ slower) & 0.013\,$\mu$s & ($12\times$ faster) \\
+$ab \bmod n$, 1024 bits  & 0.43\,$\mu$s & 26.2\,$\mu$s ($61\times$ slower) & 0.019\,$\mu$s & ($22\times$ faster) \\
+$ab \bmod n$, 2048 bits  & 1.42\,$\mu$s & 26.3\,$\mu$s ($19\times$ slower) & 0.036\,$\mu$s & ($40\times$ faster) \\
+\bottomrule
+\end{tabular}
+\caption{One GMP operation (one CPU thread) against one CGBN instance, round trip included, and
+  against 4096 CGBN instances in one launch (per operation). Exponents are full size; CGBN uses
+  8, 16 and 32 threads per instance at 512, 1024 and 2048 bits.}
+\label{tab:cgbnlat}
+\end{table}
+
+The two columns tell opposite stories. A single CGBN instance occupies between 8 and 32
+threads of one streaming multiprocessor, so it has none of the GPU's parallelism to draw on, and
+every call pays a fixed round trip of about $26\,\mu$s, the floor visible in the
+multiplication rows. Replacing a GMP call one for one is therefore $4$ to $172$ times slower.
+Thousands of independent operations of one width are another matter: they fill the device, and
+CGBN is then $12$ to $124$ times faster than GMP. CGBN only pays where the work comes in large
+batches.
+
+\subsection{Where the host's time goes}
+
+Table~\ref{tab:gmpshare} bounds what any move of GMP work to the GPU could save: the share of
+host time that falls in \code{libgmp}. A thread blocked in a CUDA synchronization spins in the
+driver, so the \code{libcuda} share is time spent waiting for the GPU.
+
+\begin{table}[t]
+\centering
+\begin{tabular}{lrrrrr}
+\toprule
+Run & Wall & \code{libgmp} & gcd, division & \code{mpf} & \code{libcuda} \\
+\midrule
+Prover, 140 digits, host only & 67.6\,s & 92\% & 76\% & 0.0\% & --- \\
+Prover, 140 digits, \code{-C} & 2.9\,s  & 65\% & 52\% & 0.1\% & 24\% \\
+\code{gmpecmfft}, 2\,000 bits (CGBN path) & & 0.04\% & & & 90\% \\
+\code{gmpecmfft}, 20\,000 bits (cuFFT path) & & 0.06\% & & & 89\% \\
+\bottomrule
+\end{tabular}
+\caption{Share of host time by library, and for the prover the part of \code{libgmp} spent in
+  gcd and division routines and in \code{mpf} (\code{perf}, \code{cpu-clock} at 1999\,Hz). The
+  prover runs one thread, seed $1$; \code{gmpecmfft} runs $2952$ and $64$ curves,
+  $B_1 = 10^4$, $B_2 = 10^6$.}
+\label{tab:gmpshare}
+\end{table}
+
+The factorizer has almost nothing to give: its host GMP work, curve setup and one gcd per curve,
+is at most $0.06\%$ of its time, and above $16352$ bits CGBN could not even hold the numbers.
+In the prover, the host-only run is dominated by gcd and division routines
+(\code{mpn\_hgcd2}, \code{div2}): the prover's point arithmetic is affine and pays a modular
+inversion for every point addition, both in its elliptic curve method and in the point checks of
+each downrun step. The elliptic curve method's share of that is exactly what the CGBN backend
+replaces, with inversion-free Montgomery curves run thousands at a time; it is why \code{-C}
+takes the proof from $67.6$ to $2.9$\,s. With \code{-C} the remaining host time is still
+mostly the same affine arithmetic (gcd and division, $52\%$; the class polynomials' \code{mpf}
+arithmetic is only $0.1\%$ at the default precision). It belongs to work that is small and
+sequential: the host's own first attempt at every factorization, which the dispatch policy keeps
+on the host because most attempts are meant to fail quickly (escalating all of them was measured
+to make proofs slower), and the downrun's point checks, a short chain per step. Neither offers
+the thousands of independent operations Table~\ref{tab:cgbnlat} requires. The GMP work that
+batches has already moved; the rest cannot, at least not one call at a time.
+
+\subsection{Batch proofs over MPI}
+
+Table~\ref{tab:mpicgbn} measures the end result for \code{gmpecpp-mpi}: the eighteen primes of
+$90$ to $180$ digits in \code{bench/primes.txt}, proved with and without \code{-C}, in several
+layouts of worker ranks and ECM threads, for five seeds each. Runs with and without the GPU
+alternate, so slow drift affects both alike, and every proof in every run completed.
+
+\begin{table}[t]
+\centering
+\begin{tabular}{lrrrr}
+\toprule
+Workers $\times$ threads & Seeds & Host only & \code{-C} (CGBN) & Ratio \\
+\midrule
+$1 \times 8$  & 5 & 47.5\,s (39.3--57.3) & 25.9\,s (23.7--27.7) & $1.83\times$ \\
+$1 \times 16$ & 1 & 33.1\,s & 24.2\,s & $1.37\times$ \\
+$1 \times 32$ & 1 & 27.6\,s & 23.1\,s & $1.20\times$ \\
+$4 \times 8$  & 5 & 17.0\,s (13.4--19.8) & 17.4\,s (15.7--18.6) & $0.98\times$ \\
+$8 \times 4$  & 5 & 21.5\,s (20.1--24.9) & 18.5\,s (17.0--19.5) & $1.16\times$ \\
+\midrule
+$1 \times 8$, rank bound to one core & 1 & 185.3\,s & 51.7\,s & $3.59\times$ \\
+\bottomrule
+\end{tabular}
+\caption{Wall time of the batch of eighteen proofs, mean (minimum--maximum) over the seeds,
+  with every rank unbound, except in the last row. One GPU serves every rank.}
+\label{tab:mpicgbn}
+\end{table}
+
+Three things follow. First, the GPU's advantage shrinks as the host gets threads: $1.83\times$
+with one worker of eight threads, $1.37\times$ with sixteen, $1.20\times$ with thirty-two. The
+prover always tries its host ECM first and reaches the GPU only for cofactors of at least $192$
+bits, so the more threads the host attempt has, the more often it succeeds before the GPU is
+needed. Second, with four or eight workers sharing one GPU, the advantage disappears in wall
+time ($0.98\times$ and $1.16\times$): the ranks contend for the device, and each pays its own
+CUDA start-up. A 90-digit proof that takes $1.4$ to $1.6$\,s with \code{-C} on one worker takes
+$3.2$ to $3.6$\,s with four workers and $6.5$ to $7.2$\,s with eight, across all five seeds. Third, the GPU's real contribution is predictability. Across seeds, a host-only
+batch of one worker took $39$ to $57$\,s, the CGBN batch $24$ to $28$\,s.
+
+Per proof (one worker, eight threads, median over five seeds), the picture sharpens. The GPU
+turns the proofs that would grind on a stubborn cofactor into routine ones: the 140-digit proof
+from $10.6$ to $1.4$\,s ($7.7\times$), a 90-digit one from $2.8$ to $0.4$\,s ($7.5\times$), the
+150-digit one $5.2\times$ faster. On easy proofs it loses, by $0.47$ to $0.92\times$, to its
+fixed cost per escalation; eight of the eighteen are such cases, the 180-digit proof among them.
+
+The last row of Table~\ref{tab:mpicgbn} records a trap worth knowing. For a job of two
+processes, Open MPI binds each rank to one core unless told otherwise (\code{-{}-bind-to none},
+or oversubscription, which disables binding); the eight ECM threads of the worker then share
+that core's two hardware threads. The host-only batch slows from $45$ to $185$\,s, while the
+CGBN batch, which needs little host time, slows only from $26$ to $52$\,s, and the comparison
+shows a spurious $3.6\times$. \code{mpirun -{}-report-bindings} shows the binding. The harness
+passes \code{-{}-bind-to none} everywhere else.
+
+Two properties of the prover govern how these runs should be read. Every proof reseeds the
+prover's generator from the configured seed, so the order in which ranks take numbers does not
+matter, and a seed fixes each proof's random choices. With more than one ECM thread, however,
+the host ECM is a race --- the first thread to find a factor wins, through an atomic flag --- and
+a different factor leads the downrun elsewhere; under contention from other ranks the race can
+resolve differently from one run to the next. The ranges in Table~\ref{tab:mpicgbn} therefore
+include variation from thread timing as well as from the seeds.
+
+In short: CGBN helps where the work batches --- the elliptic curve method, where it is already
+used --- and nowhere else. On this machine, for batch proving, it helps most when the host has
+few threads per proof and the GPU few users, and it removes the occasional pathological proof in
+every configuration. The $3.48\times$ of Section~\ref{sec:results} was measured with one host
+thread per proof, the configuration most favourable to the GPU, and is consistent with this
+trend. Moving the remaining host GMP work to the GPU would make it slower.
 
 \section{Verification}
 \label{sec:verify}
@@ -663,9 +1143,15 @@ Twenty certificates, from ten primes of ninety to one hundred and forty
 digits under both backends, verify successfully.
 
 \section{Results}
+\label{sec:results}
 
-Measurements were taken on an NVIDIA GeForce RTX 4080 Laptop (sm\_89),
-CUDA 12.9, GCC 14.3.1 at \code{-O2}, with the seed pinned.
+Measurements were taken in November 2026 on an NVIDIA RTX PRO 4500 Blackwell
+(sm\_120), CUDA 13.2, GCC 14.3.1 at \code{-O2}, with the seed pinned and stage two in
+the prover's GPU path. The first edition's figures (RTX 4080 laptop, stage one only:
+$28.8\times$ at 140 digits, the sweep $2.67\times$ in aggregate) are not directly
+comparable, since the host CPUs differ (the 140-digit proof took 53\,s on that host and
+68\,s on this one); like for like on this machine, the sweep's thirty-six GPU proofs took
+$145.9$\,s with stage one only and $117.9$--$120.8$\,s with stage two.
 
 \begin{table}[t]
 \centering
@@ -673,13 +1159,13 @@ CUDA 12.9, GCC 14.3.1 at \code{-O2}, with the seed pinned.
 \toprule
 Digits & Host & GPU & Speedup & Host ECM & GPU ECM \\
 \midrule
-20  & 0.006\,s  & 0.006\,s & 1.02$\times$ & 0.003\,s & 0.003\,s \\
-30  & 0.086\,s  & 0.085\,s & 1.02$\times$ & 0.050\,s & 0.051\,s \\
-40  & 0.135\,s  & 0.137\,s & 0.99$\times$ & 0.123\,s & 0.124\,s \\
-60  & 0.169\,s  & 0.166\,s & 1.02$\times$ & 0.128\,s & 0.127\,s \\
-90  & 2.105\,s  & 0.860\,s & 2.45$\times$ & 2.014\,s & 0.787\,s \\
-110 & 5.169\,s  & 1.614\,s & 3.20$\times$ & 5.008\,s & 1.490\,s \\
-140 & 53.446\,s & 1.855\,s & 28.81$\times$ & 53.283\,s & 1.687\,s \\
+20  & 0.008\,s  & 0.008\,s & 1.01$\times$ & 0.004\,s & 0.004\,s \\
+30  & 0.110\,s  & 0.108\,s & 1.02$\times$ & 0.064\,s & 0.065\,s \\
+40  & 0.173\,s  & 0.175\,s & 0.99$\times$ & 0.156\,s & 0.158\,s \\
+60  & 0.209\,s  & 0.209\,s & 1.00$\times$ & 0.159\,s & 0.159\,s \\
+90  & 2.698\,s  & 1.067\,s & 2.53$\times$ & 2.580\,s & 0.973\,s \\
+110 & 6.574\,s  & 2.009\,s & 3.27$\times$ & 6.373\,s & 1.856\,s \\
+140 & 67.994\,s & 2.660\,s & 25.57$\times$ & 67.787\,s & 2.444\,s \\
 \bottomrule
 \end{tabular}
 \caption{Whole-proof timings. The final two columns confirm that the
@@ -689,18 +1175,18 @@ Digits & Host & GPU & Speedup & Host ECM & GPU ECM \\
 
 Over a thirty-six-proof sweep covering every prime of ninety digits or
 more in the committed benchmark data, at two seeds each, the GPU backend
-is faster in twenty-five runs, with median speedup $2.41\times$, range
-$0.48\times$ to $26.7\times$, and aggregate $329.7 \to 123.3$ seconds,
-or $2.67\times$.
+is faster in twenty-seven runs, with median speedup $2.37\times$, range
+$0.57\times$ to $22.6\times$, and aggregate $420.6 \to 120.8$ seconds,
+or $3.48\times$.
 
 The aggregate understates the phenomenon. Host runtimes across that sweep
-span $0.67$ to $52.7$ seconds; GPU-assisted runtimes span $0.67$ to
-$16.8$ seconds. The effect is best described as variance reduction: the backend
+span $0.83$ to $67.3$ seconds; GPU-assisted runtimes span $0.91$ to
+$19.7$ seconds. The effect is best described as variance reduction: the backend
 does not uniformly accelerate proofs so much as eliminate pathological
 ones, in which the host's twenty curves per bound labour against a
 cofactor that thousands of curves split at once. Every run in which the
-backend loses is one in which the host was already fast, and it loses by
-a fraction of a second.
+backend loses is one in which the host took $6.5$\,s or less, except one 180-digit
+run ($19.3$ against $19.7$\,s); at 180 digits the two are level.
 
 A corollary appears in the certificate lengths. At one hundred and forty
 digits the host required fifteen steps and $51.9$ seconds where the GPU
@@ -713,8 +1199,14 @@ GPU can use, so its proofs are frequently shorter as well as faster.
 Class polynomial degree, that is the class number $h(D)$, must remain
 below $8192$; no bounds check exists. Polynomial buffers are fixed-size
 stack arrays and the root-finding routine is recursive, at approximately
-$512$\,KB per frame. The GPU backend implements stage one of ECM only;
-stage two would extend its reach further. The exception introduced in
+$512$\,KB per frame. The CGBN stage two uses the simple prime
+continuation, whose cost grows with the number of primes up to $B_2$; GMP-ECM's FFT
+continuation reaches far larger $B_2$ for the same work. The cuFFT backend has that
+continuation (Section~\ref{sec:fft}) but only above $16352$ bits, and its fixed costs remain
+large: every coefficient of every tree node costs a Montgomery reduction. Batching each tree
+level into one transform, and computing baby and giant points in batched rounds rather than one
+serial chain, removed per-operation launch costs, which matter only with few curves.
+The exception introduced in
 place of \code{exit(2)} unwinds frames holding raw GMP temporaries, which
 leak on that path; the path is reached only for composite inputs, but the
 defect should be addressed before the library is applied to many
@@ -750,6 +1242,10 @@ software is owed. We thank the authors of GMP and of CGBN.
   \emph{Elliptic curves and primality proving}.
   Mathematics of Computation, 61(203):29--68, 1993.
 
+\bibitem{bernstein2004} D. J. Bernstein.
+  \emph{Scaled remainder trees}. Preprint, 2004.
+  \url{https://cr.yp.to/papers.html#scaledmod}.
+
 \bibitem{cantor1981} D. G. Cantor and H. Zassenhaus.
   \emph{A new algorithm for factoring polynomials over finite fields}.
   Mathematics of Computation, 36(154):587--592, 1981.
@@ -767,6 +1263,10 @@ software is owed. We thank the authors of GMP and of CGBN.
   \emph{Su di un metodo per la risoluzione in numeri interi
   dell'equazione $\sum_{h=0}^{n} C_h x^{n-h} y^h = P$}.
   Giornale di Matematiche di Battaglini, 46:33--90, 1908.
+
+\bibitem{cufft} NVIDIA Corporation.
+  \emph{cuFFT Library User's Guide}, CUDA Toolkit 13.2.
+  \url{https://docs.nvidia.com/cuda/cufft/}.
 
 \bibitem{gmp} T. Granlund and the GMP development team.
   \emph{GNU MP: The GNU Multiple Precision Arithmetic Library}.
@@ -816,6 +1316,10 @@ software is owed. We thank the authors of GMP and of CGBN.
   factorization}.
   Mathematics of Computation, 48(177):243--264, 1987.
 
+\bibitem{montgomery1992} P. L. Montgomery.
+  \emph{An FFT extension of the elliptic curve method of factorization}.
+  PhD thesis, University of California, Los Angeles, 1992.
+
 \bibitem{niven1991} I. Niven, H. S. Zuckerman and H. L. Montgomery.
   \emph{An Introduction to the Theory of Numbers}, 5th edition.
   John Wiley and Sons, 1991.
@@ -823,6 +1327,10 @@ software is owed. We thank the authors of GMP and of CGBN.
 \bibitem{rabin1980} M. O. Rabin.
   \emph{Probabilistic algorithm for testing primality}.
   Journal of Number Theory, 12(1):128--138, 1980.
+
+\bibitem{vzgathen2013} J. von zur Gathen and J. Gerhard.
+  \emph{Modern Computer Algebra}, 3rd edition.
+  Cambridge University Press, 2013.
 
 \bibitem{weber1908} H. Weber.
   \emph{Lehrbuch der Algebra}, Band III, 2nd edition.
